@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -79,9 +78,11 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	}
 	installation, err := s.store.Installation(r.Context(), id)
 	if err != nil {
+		logAt(warnLevel, "live authentication rejected installation_id=%s reason=installation_not_registered error=%v", installationLogID(id), err)
 		writeAPIError(w, http.StatusUnauthorized, errorInstallationNotRegistered, "installation is not registered")
 		return
 	}
+	logAt(infoLevel, "live websocket upgrade installation_id=%s username=%s", installationLogID(installation.ID), installation.Handle)
 	websocket.Server{
 		Handler:   func(conn *websocket.Conn) { s.hub.connect(r.Context(), conn, installation, s.store) },
 		Handshake: func(_ *websocket.Config, _ *http.Request) error { return nil },
@@ -194,7 +195,7 @@ func (h *LiveHub) startCall(ctx context.Context, client *liveClient, event liveE
 	if recipientClient != nil {
 		h.reply(recipientClient, liveEvent{Type: "incoming", CallID: call.id, CallerUsername: call.callerUsername})
 	} else if err := h.notifier.NotifyLiveInvite(ctx, recipient.FCMToken, call.id, call.callerUsername); err != nil {
-		log.Printf("notify live call %s: %v", call.id, err)
+		logAt(errorLevel, "notify live call failed call_id=%s error=%v", call.id, err)
 	}
 	go h.expireCall(call.id, call.expiresAt, "unanswered")
 }

@@ -1,10 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -126,7 +127,7 @@ func (s *Server) sendTouch(w http.ResponseWriter, r *http.Request) {
 	}
 	if isNew {
 		if err := s.notifier.NotifyTouch(r.Context(), token, created.ID); err != nil {
-			log.Printf("notify touch %s: %v", created.ID, err)
+			logAt(errorLevel, "notify touch failed touch_id=%s error=%v", created.ID, err)
 		}
 	}
 	writeJSON(w, http.StatusAccepted, touchAcceptedResponse{
@@ -219,6 +220,7 @@ func validateTouch(period int, amplitudes []int) error {
 func installationID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := r.Header.Get("X-Installation-ID")
 	if !uuidPattern.MatchString(id) {
+		logAt(warnLevel, "authentication rejected method=%s path=%s installation_id=%s reason=missing_or_invalid_header", r.Method, r.URL.Path, installationLogID(id))
 		writeAPIError(w, http.StatusUnauthorized, errorUnauthenticated, "missing or invalid X-Installation-ID")
 		return "", false
 	}
@@ -249,7 +251,28 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string) {
 func requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(started).Round(time.Millisecond))
+		response := &responseLogWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(response, r)
+		level := infoLevel
+		if response.status >= 500 {
+			level = errorLevel
+		} else if response.status >= 400 {
+			level = warnLevel
+		}
+		logAt(level, "http request method=%s path=%s status=%d duration=%s installation_id=%s", r.Method, r.URL.Path, response.status, time.Since(started).Round(time.Millisecond), installationLogID(r.Header.Get("X-Installation-ID")))
 	})
+}
+
+type responseLogWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseLogWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseLogWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.ResponseWriter.(http.Hijacker).Hijack()
 }

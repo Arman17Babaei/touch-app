@@ -107,11 +107,15 @@ class TouchCommunication private constructor(private val context: Context) {
     }
 
     internal suspend fun refreshFcmToken() {
-        if (FirebaseApp.getApps(context).isEmpty()) return
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            CommunicationLog.warn("FCM unavailable: Firebase is not configured")
+            return
+        }
         runCatching {
             val token = FirebaseMessaging.getInstance().token.awaitResult()
             settingsStore.saveFcmToken(token)
-        }
+            CommunicationLog.info("FCM registration token refreshed")
+        }.onFailure { CommunicationLog.warn("FCM token refresh failed: ${it.message}", it) }
     }
 
     companion object {

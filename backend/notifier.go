@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	firebase "firebase.google.com/go/v4"
@@ -20,14 +19,14 @@ type logNotifier struct{}
 
 func (logNotifier) NotifyTouch(_ context.Context, token, touchID string) error {
 	if token != "" {
-		log.Printf("FCM disabled; touch %s remains queued", touchID)
+		logAt(warnLevel, "fcm disabled notification=touch touch_id=%s", touchID)
 	}
 	return nil
 }
 
 func (logNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername string) error {
 	if token != "" {
-		log.Printf("FCM disabled; live call %s from %s remains pending", callID, callerUsername)
+		logAt(warnLevel, "fcm disabled notification=live_invite call_id=%s caller=%s", callID, callerUsername)
 	}
 	return nil
 }
@@ -38,6 +37,7 @@ type fcmNotifier struct {
 
 func NewNotifier(ctx context.Context, projectID, credentialsFile string) (Notifier, error) {
 	if projectID == "" || credentialsFile == "" {
+		logAt(warnLevel, "fcm disabled project_id_set=%t credentials_file_set=%t", projectID != "", credentialsFile != "")
 		return logNotifier{}, nil
 	}
 	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: projectID}, option.WithCredentialsFile(credentialsFile))
@@ -48,6 +48,7 @@ func NewNotifier(ctx context.Context, projectID, credentialsFile string) (Notifi
 	if err != nil {
 		return nil, fmt.Errorf("initialize firebase messaging: %w", err)
 	}
+	logAt(infoLevel, "fcm enabled project_id=%s credentials_file=%s", projectID, credentialsFile)
 	return &fcmNotifier{client: client}, nil
 }
 
@@ -55,7 +56,7 @@ func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID string) er
 	if token == "" {
 		return nil
 	}
-	_, err := n.client.Send(ctx, &messaging.Message{
+	messageID, err := n.client.Send(ctx, &messaging.Message{
 		Token: token,
 		Data: map[string]string{
 			"type":    "touch_available",
@@ -63,6 +64,11 @@ func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID string) er
 		},
 		Android: &messaging.AndroidConfig{Priority: "high"},
 	})
+	if err != nil {
+		logAt(errorLevel, "fcm send failed notification=touch touch_id=%s error=%v", touchID, err)
+	} else {
+		logAt(debugLevel, "fcm send succeeded notification=touch touch_id=%s message_id=%s", touchID, messageID)
+	}
 	return err
 }
 
@@ -71,7 +77,7 @@ func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, calle
 		return nil
 	}
 	ttl := 60 * time.Second
-	_, err := n.client.Send(ctx, &messaging.Message{
+	messageID, err := n.client.Send(ctx, &messaging.Message{
 		Token: token,
 		Data: map[string]string{
 			"type":           "live_invite",
@@ -80,5 +86,10 @@ func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, calle
 		},
 		Android: &messaging.AndroidConfig{Priority: "high", TTL: &ttl},
 	})
+	if err != nil {
+		logAt(errorLevel, "fcm send failed notification=live_invite call_id=%s caller=%s error=%v", callID, callerUsername, err)
+	} else {
+		logAt(debugLevel, "fcm send succeeded notification=live_invite call_id=%s message_id=%s", callID, messageID)
+	}
 	return err
 }

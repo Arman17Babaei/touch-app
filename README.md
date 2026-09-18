@@ -59,6 +59,20 @@ The container supports these variables:
 - `TOUCH_SQLITE_PATH` (default `/data/touch.db` in the container)
 - `TOUCH_FIREBASE_PROJECT_ID`
 - `GOOGLE_APPLICATION_CREDENTIALS`
+- `TOUCH_LOG_LEVEL` (`debug`, `info`, `warn`, or `error`; default `info`)
+
+The server logs every HTTP status with a truncated installation ID. Authentication
+rejections identify whether the installation header was invalid or the ID was not
+registered. FCM logs record send outcomes and Firebase's error, but never tokens
+or message payloads. Set `TOUCH_LOG_LEVEL=debug` temporarily while diagnosing.
+
+On Android, communication logs use the `TouchComm` tag. Enable request, FCM, and
+WebSocket diagnostics at runtime without rebuilding:
+
+```shell
+adb shell setprop log.tag.TouchComm DEBUG
+adb logcat -s TouchComm
+```
 
 ## Firebase client configuration
 

@@ -131,6 +131,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
 
     private suspend fun openSocket(current: CommunicationSettings) {
         val url = current.backendUrl.replace(Regex("^http"), "ws") + "/v1/live"
+        CommunicationLog.info("WebSocket connecting url=$url installation=${current.installationId.take(8)}")
         socket = client.newWebSocket(
             Request.Builder().url(url).header("X-Installation-ID", current.installationId).build(),
             listener,
@@ -142,6 +143,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             if (socket !== webSocket) return
             socketOpen = true
             lastError = null
+            CommunicationLog.info("WebSocket connected status=${response.code}")
             val id = callId ?: return
             when {
                 _state.value.status == LiveStatus.RECONNECTING -> sendControl("resume", id)
@@ -187,6 +189,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
                 "peerUnavailable" -> update(LiveStatus.RECONNECTING, reason = "Peer unavailable")
                 "error" -> {
                     lastError = event.optString("code", "Live call error")
+                    CommunicationLog.warn("Live event error code=$lastError")
                     closeLocal(lastError, LiveStatus.ERROR)
                 }
             }
@@ -198,6 +201,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             socket = null
             if (intentionalClose) return
             lastError = "${response?.code ?: "network"}: ${t.message}"
+            CommunicationLog.warn("WebSocket failure status=${response?.code ?: "none"} error=${t.message}", t)
             handleUnexpectedDisconnect()
         }
 
@@ -205,6 +209,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             if (socket !== webSocket) return
             socketOpen = false
             socket = null
+            CommunicationLog.info("WebSocket closed code=$code reason=$reason")
             if (!intentionalClose) handleUnexpectedDisconnect()
         }
     }

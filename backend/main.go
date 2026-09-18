@@ -35,7 +35,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("touch backend listening on %s", listenAddr)
+		logAt(infoLevel, "touch backend listening addr=%s log_level=%s", listenAddr, env("TOUCH_LOG_LEVEL", "info"))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
@@ -47,7 +47,7 @@ func main() {
 		select {
 		case <-cleanup.C:
 			if err := store.DeleteExpired(context.Background(), time.Now()); err != nil {
-				log.Printf("delete expired touches: %v", err)
+				logAt(errorLevel, "delete expired touches error=%v", err)
 			}
 		case <-ctx.Done():
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
