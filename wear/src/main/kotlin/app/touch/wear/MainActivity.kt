@@ -1,6 +1,7 @@
 package app.touch.wear
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -51,16 +52,20 @@ import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import app.touch.communication.CommunicationSettings
 import app.touch.communication.InboxTouch
+import app.touch.communication.LiveStatus
 import app.touch.communication.TouchCommunication
+import app.touch.communication.TouchNotificationIntents
 import app.touch.core.AndroidTouchPlayer
 import app.touch.core.Touch
 import app.touch.core.TouchRecorder
 import app.touch.core.amplitudeAt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val communication by lazy { TouchCommunication.get(this) }
+    private val incomingInvite = MutableStateFlow(TouchNotificationIntents.liveInvite(intent))
     private val syncHandler = Handler(Looper.getMainLooper())
     private val syncInbox = object : Runnable {
         override fun run() {
@@ -75,7 +80,8 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
         }
         val debugSetup = if (BuildConfig.DEBUG) intent.debugSetup() else null
-        setContent { TouchWearApp(communication, debugSetup) }
+        incomingInvite.value = TouchNotificationIntents.liveInvite(intent)
+        setContent { TouchWearApp(communication, debugSetup, incomingInvite) }
     }
 
     override fun onResume() {
@@ -86,7 +92,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         syncHandler.removeCallbacks(syncInbox)
+        communication.onBackground()
         super.onPause()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incomingInvite.value = TouchNotificationIntents.liveInvite(intent)
     }
 }
 
@@ -102,13 +115,19 @@ private fun android.content.Intent.debugSetup(): DebugSetup? {
 private val Charcoal = Color(0xFF101713)
 private val Coral = Color(0xFFFF6B45)
 private val Mint = Color(0xFFBAE8D0)
-private enum class Screen { RECORDER, INBOX, SETUP }
+private enum class Screen { RECORDER, LIVE, INBOX, SETUP }
 
 @Composable
-private fun TouchWearApp(communication: TouchCommunication, debugSetup: DebugSetup?) {
+private fun TouchWearApp(
+    communication: TouchCommunication,
+    debugSetup: DebugSetup?,
+    incomingInvite: MutableStateFlow<app.touch.communication.LiveInvite?>,
+) {
     MaterialTheme {
         val settings by communication.settings.collectAsState(initial = CommunicationSettings())
         var screen by remember { mutableStateOf<Screen?>(null) }
+        var liveIncoming by remember { mutableStateOf(false) }
+        val invite by incomingInvite.collectAsState()
         LaunchedEffect(Unit) {
             if (debugSetup == null) communication.initialize()
             else {
@@ -121,11 +140,20 @@ private fun TouchWearApp(communication: TouchCommunication, debugSetup: DebugSet
                 screen = if (settings.isConfigured) Screen.RECORDER else Screen.SETUP
             }
         }
+        LaunchedEffect(invite) {
+            invite?.let {
+                communication.prepareIncomingLive(it.callId, it.callerUsername)
+                liveIncoming = true
+                screen = Screen.LIVE
+                incomingInvite.value = null
+            }
+        }
         Box(Modifier.fillMaxSize().systemGestureExclusion().background(Charcoal), contentAlignment = Alignment.Center) {
             when (screen) {
                 Screen.SETUP -> SetupScreen(settings, communication) { screen = Screen.RECORDER }
                 Screen.INBOX -> InboxScreen(communication) { screen = Screen.RECORDER }
-                Screen.RECORDER -> RecorderScreen(communication, { screen = Screen.INBOX }, { screen = Screen.SETUP })
+                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming) { screen = Screen.RECORDER }
+                Screen.RECORDER -> RecorderScreen(communication, { liveIncoming = false; screen = Screen.LIVE }, { screen = Screen.INBOX }, { screen = Screen.SETUP })
                 null -> Text("Starting…")
             }
         }
@@ -174,28 +202,20 @@ private fun WearInput(value: String, onValueChange: (String) -> Unit, hint: Stri
 }
 
 @Composable
-private fun RecorderScreen(communication: TouchCommunication, onInbox: () -> Unit, onSetup: () -> Unit) {
+private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit, onInbox: () -> Unit, onSetup: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    val recorder = remember(communication) { TouchRecorder(onSample = communication::streamSample) }
+    val recorder = remember(communication) { TouchRecorder() }
     val player = remember { AndroidTouchPlayer(context.applicationContext) }
     val outbox by communication.outbox.collectAsState(initial = emptyList())
-    val liveStatus by communication.liveStatus.collectAsState()
     var recording by remember { mutableStateOf(false) }
     var elapsed by remember { mutableIntStateOf(0) }
     var touch by remember { mutableStateOf<Touch?>(null) }
     var sentId by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(liveStatus) {
-        val window = (context as? android.app.Activity)?.window
-        if (liveStatus.name != "OFF") window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    }
-
     fun finish(includePartial: Boolean) {
         if (includePartial && recorder.isRecording) recorder.sample()
         touch = recorder.stop()
-        communication.endLiveTouch()
         elapsed = touch?.durationMillis?.toInt() ?: 0
         recording = false
         sentId = null
@@ -244,7 +264,6 @@ private fun RecorderScreen(communication: TouchCommunication, onInbox: () -> Uni
                 Button(onClick = {
                     player.cancel()
                     communication.setInteractionBusy(true)
-                    communication.beginLiveTouch(recorder.samplePeriodMillis)
                     recorder.start()
                     elapsed = 0
                     recording = true
@@ -262,7 +281,72 @@ private fun RecorderScreen(communication: TouchCommunication, onInbox: () -> Uni
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(top = 3.dp)) {
                 Text("Inbox", fontSize = 10.sp, modifier = Modifier.clickable(onClick = onInbox).padding(4.dp))
                 Text("Setup", fontSize = 10.sp, modifier = Modifier.clickable(onClick = onSetup).padding(4.dp))
-                Text(if (liveStatus.name == "OFF") "Live" else "${liveStatus.name.lowercase()}", fontSize = 10.sp, modifier = Modifier.clickable { if (liveStatus.name == "OFF") communication.startLive() else communication.stopLive() }.padding(4.dp))
+                Text("Live", fontSize = 10.sp, modifier = Modifier.clickable(onClick = onLive).padding(4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, onBack: () -> Unit) {
+    val live by communication.liveState.collectAsState()
+    var elapsed by remember { mutableIntStateOf(0) }
+    LaunchedEffect(autoStart) { if (autoStart) communication.startLive() }
+    LaunchedEffect(live.connectedAtMs) {
+        val connectedAt = live.connectedAtMs ?: return@LaunchedEffect
+        while (true) {
+            elapsed = (System.currentTimeMillis() - connectedAt).coerceAtLeast(0).toInt()
+            delay(250)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { communication.setLiveAmplitude(0) } }
+    val connected = live.status == LiveStatus.CONNECTED
+    val label = when (live.status) {
+        LiveStatus.OFF -> "READY"
+        LiveStatus.CONNECTING -> "CONNECTING…"
+        LiveStatus.RINGING -> "RINGING…"
+        LiveStatus.INCOMING -> "${live.peerUsername}\nIS CALLING"
+        LiveStatus.CONNECTED -> "CONNECTED\n${formatDuration(elapsed)}"
+        LiveStatus.RECONNECTING -> "RECONNECTING…"
+        LiveStatus.ENDED -> "CALL ENDED"
+        LiveStatus.ERROR -> "CALL FAILED"
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.fillMaxSize().padding(10.dp),
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.fillMaxWidth().height(100.dp)
+                .background(Brush.verticalGradient(listOf(Coral, Mint, Color(0xFF26342C))), CircleShape)
+                .pointerInput(connected) {
+                    if (!connected) return@pointerInput
+                    try {
+                        awaitEachGesture {
+                            do {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                communication.setLiveAmplitude(
+                                    pressed.maxOfOrNull { amplitudeAt(it.position.y, size.height.toFloat()) } ?: 0,
+                                )
+                                event.changes.forEach { it.consume() }
+                            } while (event.changes.any { it.pressed })
+                            communication.setLiveAmplitude(0)
+                        }
+                    } finally { communication.setLiveAmplitude(0) }
+                },
+        ) { Text(if (connected) "TOUCH" else label, fontSize = 11.sp) }
+        when (live.status) {
+            LiveStatus.INCOMING -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = communication::declineLive, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal)) { Text("NO", fontSize = 9.sp) }
+                Button(onClick = communication::acceptLive, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("YES", fontSize = 9.sp) }
+            }
+            LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.CONNECTED, LiveStatus.RECONNECTING ->
+                Button(onClick = communication::stopLive, modifier = Modifier.size(52.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("END", fontSize = 9.sp) }
+            LiveStatus.ENDED, LiveStatus.ERROR, LiveStatus.OFF -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Back", modifier = Modifier.clickable(onClick = onBack).padding(10.dp), fontSize = 10.sp)
+                Text("Call again", color = Coral, modifier = Modifier.clickable(onClick = communication::startLive).padding(10.dp), fontSize = 10.sp)
             }
         }
     }
@@ -272,8 +356,20 @@ private fun RecorderScreen(communication: TouchCommunication, onInbox: () -> Uni
 private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
     val inbox by communication.inbox.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
+    var confirmingClear by remember { mutableStateOf(false) }
+    if (confirmingClear) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize().padding(24.dp)) {
+            Text("Clear all touches?", fontSize = 12.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Cancel", modifier = Modifier.clickable { confirmingClear = false }.padding(10.dp), fontSize = 10.sp)
+                Text("Clear", color = Coral, modifier = Modifier.clickable { confirmingClear = false; scope.launch { communication.clearInbox() } }.padding(10.dp), fontSize = 10.sp)
+            }
+        }
+        return
+    }
     ScalingLazyColumn(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         item { Text("INBOX", color = Coral) }
+        item { Text("Clear", color = if (inbox.isEmpty()) Color.Gray else Coral, modifier = Modifier.clickable(enabled = inbox.isNotEmpty()) { confirmingClear = true }.padding(6.dp), fontSize = 10.sp) }
         if (inbox.isEmpty()) item { Text("No touches", fontSize = 11.sp) }
         items(inbox, key = InboxTouch::id) { item ->
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth(.9f).background(Color(0xFF26342C), RoundedCornerShape(14.dp)).padding(8.dp)) {

@@ -18,12 +18,12 @@ class AndroidTouchPlayer(
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
-    fun play(touch: Touch): Boolean {
+    fun play(touch: Touch, cancelExisting: Boolean = true): Boolean {
         if (!vibrator.hasVibrator() || touch.isSilent || touch.amplitudes.isEmpty()) return false
         val waveform = optimizer.optimize(touch, vibrator.hasAmplitudeControl())
         if (waveform.timingsMillis.isEmpty()) return false
 
-        cancel()
+        if (cancelExisting) cancel()
         val effect = VibrationEffect.createWaveform(
             waveform.timingsMillis,
             waveform.amplitudes,

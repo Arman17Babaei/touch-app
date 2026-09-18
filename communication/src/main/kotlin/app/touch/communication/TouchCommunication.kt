@@ -7,6 +7,8 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -26,12 +28,21 @@ class TouchCommunication private constructor(private val context: Context) {
     val inbox: Flow<List<InboxTouch>> = dao.observeInbox().map { items -> items.map(InboxTouchEntity::toModel) }
     val outbox: Flow<List<OutboxTouch>> = dao.observeOutbox().map { items -> items.map(OutboxTouchEntity::toModel) }
     val liveStatus = live.status
+	val liveState = live.state
 
-    fun startLive() = live.start()
-    fun stopLive() = live.stop()
-    fun beginLiveTouch(samplePeriodMs: Int) = live.beginLocalStream(samplePeriodMs)
-    fun streamSample(amplitude: Int) = live.sample(amplitude)
-    fun endLiveTouch() = live.endLocalStream()
+    fun startLive() = live.startCall()
+    fun prepareIncomingLive(callId: String, callerUsername: String) = live.prepareIncoming(callId, callerUsername)
+    fun acceptLive() = live.accept()
+    fun declineLive() = live.decline()
+    fun stopLive() = live.hangUp()
+    fun setLiveAmplitude(amplitude: Int) = live.setAmplitude(amplitude)
+    fun onBackground() {
+        if (live.state.value.status in setOf(
+                LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.INCOMING,
+                LiveStatus.CONNECTED, LiveStatus.RECONNECTING,
+            )
+        ) live.hangUp()
+    }
 
     suspend fun initialize() {
         settingsStore.ensureInstallationId()
@@ -89,6 +100,12 @@ class TouchCommunication private constructor(private val context: Context) {
 
     suspend fun play(item: InboxTouch): Boolean = PlaybackCoordinator.playOne(context, this, item.id, item.touch)
 
+    suspend fun clearInbox() {
+        PlaybackCoordinator.cancel()
+        dao.clearInbox()
+        TouchNotifications.dismiss(context)
+    }
+
     internal suspend fun refreshFcmToken() {
         if (FirebaseApp.getApps(context).isEmpty()) return
         runCatching {
@@ -118,6 +135,14 @@ private suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitResult(): T =
 internal object PlaybackCoordinator {
     val interactionBusy = AtomicBoolean(false)
     private val mutex = Mutex()
+    private val generation = AtomicLong(0)
+    private val activePlayer = AtomicReference<AndroidTouchPlayer?>(null)
+
+    fun cancel() {
+        generation.incrementAndGet()
+        activePlayer.getAndSet(null)?.cancel()
+        interactionBusy.set(false)
+    }
 
     suspend fun playFresh(context: Context, communication: TouchCommunication) {
         if (interactionBusy.get()) return
@@ -133,16 +158,22 @@ internal object PlaybackCoordinator {
 
     suspend fun playOne(context: Context, communication: TouchCommunication, id: String, touch: Touch): Boolean {
         if (!interactionBusy.compareAndSet(false, true)) return false
+        val playbackGeneration = generation.get()
+        val player = AndroidTouchPlayer(context.applicationContext)
+        activePlayer.set(player)
         return try {
-            val played = AndroidTouchPlayer(context.applicationContext).play(touch)
+            val played = player.play(touch)
             if (played) {
                 delay(touch.durationMillis + 100)
-                val playedAt = System.currentTimeMillis()
-                communication.dao.markPlayed(id, playedAt)
-                runCatching { communication.api.ack(communication.settingsStore.current(), id, "played") }
+                if (generation.get() == playbackGeneration) {
+                    val playedAt = System.currentTimeMillis()
+                    communication.dao.markPlayed(id, playedAt)
+                    runCatching { communication.api.ack(communication.settingsStore.current(), id, "played") }
+                }
             }
             played
         } finally {
+            activePlayer.compareAndSet(player, null)
             interactionBusy.set(false)
         }
     }

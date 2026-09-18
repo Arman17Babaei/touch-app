@@ -71,6 +71,9 @@ internal interface TouchDao {
     @Query("UPDATE inbox_touches SET playedAt = :playedAt WHERE id = :id")
     suspend fun markPlayed(id: String, playedAt: Long)
 
+    @Query("DELETE FROM inbox_touches")
+    suspend fun clearInbox()
+
     @Query("DELETE FROM inbox_touches WHERE id NOT IN (SELECT id FROM inbox_touches ORDER BY createdAt DESC LIMIT 100)")
     suspend fun trimInbox()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -11,14 +12,22 @@ import (
 )
 
 type Notifier interface {
-	Notify(ctx context.Context, token, touchID string) error
+	NotifyTouch(ctx context.Context, token, touchID string) error
+	NotifyLiveInvite(ctx context.Context, token, callID, callerUsername string) error
 }
 
 type logNotifier struct{}
 
-func (logNotifier) Notify(_ context.Context, token, touchID string) error {
+func (logNotifier) NotifyTouch(_ context.Context, token, touchID string) error {
 	if token != "" {
 		log.Printf("FCM disabled; touch %s remains queued", touchID)
+	}
+	return nil
+}
+
+func (logNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername string) error {
+	if token != "" {
+		log.Printf("FCM disabled; live call %s from %s remains pending", callID, callerUsername)
 	}
 	return nil
 }
@@ -42,7 +51,7 @@ func NewNotifier(ctx context.Context, projectID, credentialsFile string) (Notifi
 	return &fcmNotifier{client: client}, nil
 }
 
-func (n *fcmNotifier) Notify(ctx context.Context, token, touchID string) error {
+func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID string) error {
 	if token == "" {
 		return nil
 	}
@@ -53,6 +62,23 @@ func (n *fcmNotifier) Notify(ctx context.Context, token, touchID string) error {
 			"touchId": touchID,
 		},
 		Android: &messaging.AndroidConfig{Priority: "high"},
+	})
+	return err
+}
+
+func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, callerUsername string) error {
+	if token == "" {
+		return nil
+	}
+	ttl := 60 * time.Second
+	_, err := n.client.Send(ctx, &messaging.Message{
+		Token: token,
+		Data: map[string]string{
+			"type":           "live_invite",
+			"callId":         callID,
+			"callerUsername": callerUsername,
+		},
+		Android: &messaging.AndroidConfig{Priority: "high", TTL: &ttl},
 	})
 	return err
 }

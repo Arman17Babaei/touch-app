@@ -1,6 +1,7 @@
 package app.touch.mobile
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -53,8 +55,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.touch.communication.CommunicationSettings
 import app.touch.communication.InboxTouch
+import app.touch.communication.LiveStatus
 import app.touch.communication.OutboxStatus
 import app.touch.communication.TouchCommunication
+import app.touch.communication.TouchNotificationIntents
 import app.touch.core.AndroidTouchPlayer
 import app.touch.core.Touch
 import app.touch.core.TouchRecorder
@@ -62,10 +66,12 @@ import app.touch.core.amplitudeAt
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val communication by lazy { TouchCommunication.get(this) }
+    private val incomingInvite = MutableStateFlow(TouchNotificationIntents.liveInvite(intent))
     private val syncHandler = Handler(Looper.getMainLooper())
     private val syncInbox = object : Runnable {
         override fun run() {
@@ -81,7 +87,8 @@ class MainActivity : ComponentActivity() {
         }
         enableEdgeToEdge()
         val debugSetup = if (BuildConfig.DEBUG) intent.debugSetup() else null
-        setContent { TouchMobileApp(communication, debugSetup) }
+        incomingInvite.value = TouchNotificationIntents.liveInvite(intent)
+        setContent { TouchMobileApp(communication, debugSetup, incomingInvite) }
     }
 
     override fun onResume() {
@@ -92,7 +99,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         syncHandler.removeCallbacks(syncInbox)
+        communication.onBackground()
         super.onPause()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incomingInvite.value = TouchNotificationIntents.liveInvite(intent)
     }
 }
 
@@ -109,13 +123,19 @@ private val Ink = Color(0xFF17201B)
 private val Paper = Color(0xFFF3EFE4)
 private val Signal = Color(0xFFFF5A36)
 private val Mint = Color(0xFFB9E6CF)
-private enum class Screen { RECORDER, INBOX, SETUP }
+private enum class Screen { RECORDER, LIVE, INBOX, SETUP }
 
 @Composable
-private fun TouchMobileApp(communication: TouchCommunication, debugSetup: DebugSetup?) {
+private fun TouchMobileApp(
+    communication: TouchCommunication,
+    debugSetup: DebugSetup?,
+    incomingInvite: MutableStateFlow<app.touch.communication.LiveInvite?>,
+) {
     MaterialTheme {
         val settings by communication.settings.collectAsState(initial = CommunicationSettings())
         var screen by remember { mutableStateOf<Screen?>(null) }
+        var liveIncoming by remember { mutableStateOf(false) }
+        val invite by incomingInvite.collectAsState()
         LaunchedEffect(Unit) {
             if (debugSetup == null) communication.initialize()
             else {
@@ -128,11 +148,20 @@ private fun TouchMobileApp(communication: TouchCommunication, debugSetup: DebugS
                 screen = if (settings.isConfigured) Screen.RECORDER else Screen.SETUP
             }
         }
+        LaunchedEffect(invite) {
+            invite?.let {
+                communication.prepareIncomingLive(it.callId, it.callerUsername)
+                liveIncoming = true
+                screen = Screen.LIVE
+                incomingInvite.value = null
+            }
+        }
         Surface(color = Paper, modifier = Modifier.fillMaxSize()) {
             when (screen) {
                 Screen.SETUP -> SetupScreen(settings, communication) { screen = Screen.RECORDER }
                 Screen.INBOX -> InboxScreen(communication) { screen = Screen.RECORDER }
-                Screen.RECORDER -> RecorderScreen(communication, settings.username, { screen = Screen.INBOX }, { screen = Screen.SETUP })
+                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming) { screen = Screen.RECORDER }
+                Screen.RECORDER -> RecorderScreen(communication, settings.username, { liveIncoming = false; screen = Screen.LIVE }, { screen = Screen.INBOX }, { screen = Screen.SETUP })
                 null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Starting…") }
             }
         }
@@ -173,31 +202,24 @@ private fun SetupScreen(settings: CommunicationSettings, communication: TouchCom
 private fun RecorderScreen(
     communication: TouchCommunication,
     username: String,
+    onLive: () -> Unit,
     onInbox: () -> Unit,
     onSetup: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    val recorder = remember(communication) { TouchRecorder(onSample = communication::streamSample) }
+    val recorder = remember(communication) { TouchRecorder() }
     val player = remember { AndroidTouchPlayer(context.applicationContext) }
     val outbox by communication.outbox.collectAsState(initial = emptyList())
-    val liveStatus by communication.liveStatus.collectAsState()
     var recording by remember { mutableStateOf(false) }
     var elapsedMillis by remember { mutableIntStateOf(0) }
     var touch by remember { mutableStateOf<Touch?>(null) }
     var sentId by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(liveStatus) {
-        val window = (context as? android.app.Activity)?.window
-        if (liveStatus.name != "OFF") window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    }
-
     fun finishRecording(capturePartialInterval: Boolean) {
         if (!recorder.isRecording && !recording) return
         if (capturePartialInterval && recorder.isRecording) recorder.sample()
         touch = recorder.stop()
-        communication.endLiveTouch()
         elapsedMillis = touch?.durationMillis?.toInt() ?: 0
         recording = false
         communication.setInteractionBusy(false)
@@ -244,7 +266,6 @@ private fun RecorderScreen(
                 Button(onClick = {
                     player.cancel()
                     communication.setInteractionBusy(true)
-                    communication.beginLiveTouch(recorder.samplePeriodMillis)
                     recorder.start()
                     elapsedMillis = 0
                     recording = true
@@ -261,7 +282,85 @@ private fun RecorderScreen(
                 }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(containerColor = Ink), modifier = Modifier.width(92.dp)) { Text("Play") }
                 Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it) } } }, enabled = touch?.isSilent == false && sendStatus != OutboxStatus.SENDING, modifier = Modifier.width(92.dp)) { Text("Send") }
             }
-            TextButton(onClick = { if (liveStatus.name == "OFF") communication.startLive() else communication.stopLive() }) { Text(if (liveStatus.name == "OFF") "Go live" else "Live: ${liveStatus.name.lowercase()}") }
+            TextButton(onClick = onLive) { Text("Go live") }
+        }
+    }
+}
+
+@Composable
+private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, onBack: () -> Unit) {
+    val live by communication.liveState.collectAsState()
+    var elapsed by remember { mutableIntStateOf(0) }
+    LaunchedEffect(autoStart) { if (autoStart) communication.startLive() }
+    LaunchedEffect(live.connectedAtMs) {
+        val connectedAt = live.connectedAtMs ?: return@LaunchedEffect
+        while (true) {
+            elapsed = (System.currentTimeMillis() - connectedAt).coerceAtLeast(0).toInt()
+            delay(250)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { communication.setLiveAmplitude(0) } }
+    val connected = live.status == LiveStatus.CONNECTED
+    val statusText = when (live.status) {
+        LiveStatus.OFF -> "Ready"
+        LiveStatus.CONNECTING -> "Connecting…"
+        LiveStatus.RINGING -> "Ringing ${live.peerUsername}…"
+        LiveStatus.INCOMING -> "Live touch from ${live.peerUsername}"
+        LiveStatus.CONNECTED -> "Connected · ${formatDuration(elapsed)}"
+        LiveStatus.RECONNECTING -> "Reconnecting…"
+        LiveStatus.ENDED -> when (live.reason) {
+            "declined" -> "Call declined"
+            "unanswered" -> "No answer"
+            "connection_lost" -> "Connection lost"
+            else -> "Call ended"
+        }
+        LiveStatus.ERROR -> live.reason ?: "Live call failed"
+    }
+
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text("LIVE", color = Signal, fontSize = 28.sp)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = {
+                if (live.status in setOf(LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.INCOMING, LiveStatus.CONNECTED, LiveStatus.RECONNECTING)) communication.stopLive()
+                onBack()
+            }) { Text("Back") }
+        }
+        Text(statusText, color = Ink.copy(alpha = .7f))
+        Spacer(Modifier.height(16.dp))
+        Box(
+            Modifier.weight(1f).fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Signal, Mint, Color(0xFFE9E5DA))), RoundedCornerShape(28.dp))
+                .pointerInput(connected) {
+                    if (!connected) return@pointerInput
+                    try {
+                        awaitEachGesture {
+                            do {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                communication.setLiveAmplitude(
+                                    pressed.maxOfOrNull { amplitudeAt(it.position.y, size.height.toFloat()) } ?: 0,
+                                )
+                                event.changes.forEach { it.consume() }
+                            } while (event.changes.any { it.pressed })
+                            communication.setLiveAmplitude(0)
+                        }
+                    } finally { communication.setLiveAmplitude(0) }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(if (connected) "TOUCH HERE" else statusText, color = Ink.copy(alpha = .65f), fontSize = 16.sp)
+        }
+        Spacer(Modifier.height(14.dp))
+        when (live.status) {
+            LiveStatus.INCOMING -> Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = communication::declineLive, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Ink)) { Text("Decline") }
+                Button(onClick = communication::acceptLive, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Signal)) { Text("Accept") }
+            }
+            LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.CONNECTED, LiveStatus.RECONNECTING ->
+                Button(onClick = communication::stopLive, colors = ButtonDefaults.buttonColors(containerColor = Signal), modifier = Modifier.fillMaxWidth()) { Text("Hang up") }
+            LiveStatus.ENDED, LiveStatus.ERROR, LiveStatus.OFF ->
+                Button(onClick = communication::startLive, colors = ButtonDefaults.buttonColors(containerColor = Signal), modifier = Modifier.fillMaxWidth()) { Text("Call again") }
         }
     }
 }
@@ -270,10 +369,21 @@ private fun RecorderScreen(
 private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
     val inbox by communication.inbox.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
+    var confirmingClear by remember { mutableStateOf(false) }
+    if (confirmingClear) {
+        AlertDialog(
+            onDismissRequest = { confirmingClear = false },
+            title = { Text("Clear inbox?") },
+            text = { Text("This removes all received touches stored on this device.") },
+            confirmButton = { TextButton(onClick = { confirmingClear = false; scope.launch { communication.clearInbox() } }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = { confirmingClear = false }) { Text("Cancel") } },
+        )
+    }
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text("Inbox", color = Ink, fontSize = 28.sp)
             Spacer(Modifier.weight(1f))
+            TextButton(onClick = { confirmingClear = true }, enabled = inbox.isNotEmpty()) { Text("Clear") }
             TextButton(onClick = onBack) { Text("Back") }
         }
         if (inbox.isEmpty()) {

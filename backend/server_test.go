@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,16 +21,38 @@ const (
 )
 
 type fakeNotifier struct {
-	tokens   []string
-	touchIDs []string
-	err      error
+	mu          sync.Mutex
+	tokens      []string
+	touchIDs    []string
+	liveCallIDs []string
+	liveCallers []string
+	err         error
 }
 
-func (n *fakeNotifier) Notify(_ context.Context, token, touchID string) error {
+func (n *fakeNotifier) NotifyTouch(_ context.Context, token, touchID string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.tokens = append(n.tokens, token)
 	n.touchIDs = append(n.touchIDs, touchID)
 	return n.err
 }
+
+func (n *fakeNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.tokens = append(n.tokens, token)
+	n.liveCallIDs = append(n.liveCallIDs, callID)
+	n.liveCallers = append(n.liveCallers, callerUsername)
+	return n.err
+}
+
+func (n *fakeNotifier) snapshot() (tokens, touchIDs, liveCallIDs, liveCallers []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.tokens...), append([]string(nil), n.touchIDs...), append([]string(nil), n.liveCallIDs...), append([]string(nil), n.liveCallers...)
+}
+
+func (n *fakeNotifier) setError(err error) { n.mu.Lock(); n.err = err; n.mu.Unlock() }
 
 func testServer(t *testing.T) (*Server, *Store, *fakeNotifier) {
 	t.Helper()
@@ -97,8 +120,9 @@ func TestSendIdempotencyFIFOAndAck(t *testing.T) {
 	if duplicate.Code != http.StatusAccepted {
 		t.Fatalf("duplicate: %d %s", duplicate.Code, duplicate.Body.String())
 	}
-	if len(notifier.touchIDs) != 1 || notifier.tokens[0] != "watch-token" {
-		t.Fatalf("unexpected notifications: %#v %#v", notifier.touchIDs, notifier.tokens)
+	tokens, touchIDs, _, _ := notifier.snapshot()
+	if len(touchIDs) != 1 || tokens[0] != "watch-token" {
+		t.Fatalf("unexpected notifications: %#v %#v", touchIDs, tokens)
 	}
 	server.now = func() time.Time { return time.Unix(1_700_000_001, 0).UTC() }
 	second := request(t, handler, http.MethodPost, "/v1/touches", phoneID, map[string]any{
@@ -166,7 +190,7 @@ func TestTouchValidationAndMissingRecipient(t *testing.T) {
 
 func TestFCMFailureDoesNotLoseCommittedTouch(t *testing.T) {
 	server, _, notifier := testServer(t)
-	notifier.err = errors.New("firebase unavailable")
+	notifier.setError(errors.New("firebase unavailable"))
 	handler := server.Handler()
 	register(t, handler, phoneID, "phone", "phone", "phone-token")
 	register(t, handler, watchID, "watch", "watch", "watch-token")

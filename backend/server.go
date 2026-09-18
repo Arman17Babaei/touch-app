@@ -25,7 +25,9 @@ type Server struct {
 }
 
 func NewServer(store *Store, notifier Notifier) *Server {
-	return &Server{store: store, notifier: notifier, now: time.Now, hub: NewLiveHub()}
+	s := &Server{store: store, notifier: notifier, now: time.Now}
+	s.hub = NewLiveHub(notifier, func() time.Time { return s.now() })
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -123,7 +125,7 @@ func (s *Server) sendTouch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isNew {
-		if err := s.notifier.Notify(r.Context(), token, created.ID); err != nil {
+		if err := s.notifier.NotifyTouch(r.Context(), token, created.ID); err != nil {
 			log.Printf("notify touch %s: %v", created.ID, err)
 		}
 	}

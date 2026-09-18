@@ -19,8 +19,10 @@ Play can distribute them from one listing on its mobile and Wear OS tracks.
 ## Backend
 
 The backend stores a touch before attempting its high-priority FCM data message.
-FCM contains only `type=touch_available` and the touch ID; the recipient fetches
-the payload from the durable FIFO inbox. Messages expire after 30 days.
+Durable-message FCM contains only `type=touch_available` and the touch ID; the
+recipient fetches the payload from the durable FIFO inbox. Live invitations use
+`type=live_invite` with the ephemeral call ID and caller username. Durable
+messages expire after 30 days; Live calls are never stored.
 
 Create `backend/secrets/service-account.json` from the Firebase project that owns
 both Android apps. The directory and credential files are ignored by Git.
@@ -122,25 +124,37 @@ failures. The recipient syncs on FCM, launch, and resume; it persists and dedupe
 before acknowledging. Fresh touches (up to five minutes old) auto-play FIFO when
 the app is idle. All arrivals create an inbox entry and, when notification
 permission is granted, a notification. The newest 100 local inbox items remain
-available for replay.
+available for replay. **Clear** removes all received touches and stops current
+inbox playback on that device; already acknowledged server messages are not
+downloaded again.
 
 ## Live touch
 
-With both apps open, tap **Go live** on the phone and **Live** on the watch. Once
-both show `live`, recording on either device streams 10-sample (about 100 ms)
-batches to the saved peer while the complete recording is still retained
-locally. Both devices can transmit and receive at the same time. Live samples
-are ephemeral: they are not written to either inbox and are not retried after a
-disconnect.
+Tap **Go live** on the phone or **Live** on the watch to open the call page. The
+caller sees Connecting and Ringing; the recipient receives a high-priority FCM
+notification and explicitly accepts or declines. An unanswered call expires
+after 60 seconds. Once connected, both touch surfaces transmit continuously in
+10-sample (about 100 ms) batches, including zero-amplitude silence, until either
+side hangs up. There is no 30-second Live limit and Live samples are never saved
+to the inbox.
 
-The foreground screen is kept awake during a Live session. Locking the device,
-leaving the app, losing Wi-Fi, or stopping the backend ends best-effort realtime
-delivery; recorded **Send** remains the durable and offline-capable path.
+The receiver starts with a roughly 300 ms jitter buffer and plays longer chunks
+instead of cancelling the vibrator for every packet. Phones without amplitude
+control retain the on/off duty-cycle mapping for intensity; watches and phones
+with amplitude control use amplitude waveforms.
+
+The app no longer keeps the screen awake. Locking or leaving either app hangs up
+the active call, while FCM continues to deliver durable touches and new Live
+invitations. An accidental network loss enters Reconnecting for up to 30 seconds;
+successful resume creates fresh stream IDs and resets sample indexes. Recorded
+**Send** remains the durable and offline-capable path.
 
 The WebSocket endpoint is `GET /v1/live`, authenticated with the same
-`X-Installation-ID` header. Client events are `start`, `samples`, and `end`;
-server-only status events are `peerUnavailable` and `error`. `startIndex` is
-zero-based and must be present even for the first batch.
+`X-Installation-ID` header. Call control uses `call`, `accept`, `decline`,
+`resume`, and `hangup`, with `ringing`, `incoming`, `connected`, `reconnecting`,
+and `ended` responses. Streaming continues to use `start`, `samples`, and `end`
+for compatibility with existing clients. `startIndex` is zero-based and must be
+present even for the first batch.
 
 ## Tests
 
@@ -150,8 +164,8 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew test assembleDebug
 ```
 
 Backend tests cover username conflicts, validation, idempotency, FIFO retrieval,
-acknowledgements, expiry, persistence across mocked FCM failure, and bidirectional
-live relay. Android unit
+acknowledgements, expiry, persistence across mocked FCM failure, call invitation,
+acceptance, hangup, and bidirectional live relay. Android unit
 tests cover settings completeness, stable installation identity selection,
 unsigned amplitude serialization, retry classification, and five-minute FIFO
 policy. Final FCM/background/offline acceptance still requires two configured

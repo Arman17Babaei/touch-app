@@ -25,14 +25,33 @@ class TouchFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        if (message.data["type"] == "touch_available") {
-            CommunicationWork.enqueueSync(applicationContext)
+        when (message.data["type"]) {
+            "touch_available" -> CommunicationWork.enqueueSync(applicationContext)
+            "live_invite" -> {
+                val callId = message.data["callId"] ?: return
+                val caller = message.data["callerUsername"] ?: return
+                TouchNotifications.showLiveInvite(applicationContext, callId, caller)
+            }
         }
+    }
+}
+
+data class LiveInvite(val callId: String, val callerUsername: String)
+
+object TouchNotificationIntents {
+    const val EXTRA_LIVE_CALL_ID = "touch.live.callId"
+    const val EXTRA_LIVE_CALLER = "touch.live.callerUsername"
+
+    fun liveInvite(intent: Intent?): LiveInvite? {
+        val callId = intent?.getStringExtra(EXTRA_LIVE_CALL_ID) ?: return null
+        val caller = intent.getStringExtra(EXTRA_LIVE_CALLER) ?: return null
+        return LiveInvite(callId, caller)
     }
 }
 
 internal object TouchNotifications {
     private const val CHANNEL_ID = "received-touches"
+    private const val LIVE_CHANNEL_ID = "live-touch-calls"
 
     fun show(context: Context, count: Int) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -58,5 +77,41 @@ internal object TouchNotifications {
             .setContentIntent(pendingIntent)
             .build()
         manager.notify(1001, notification)
+    }
+
+    fun showLiveInvite(context: Context, callId: String, callerUsername: String) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(LIVE_CHANNEL_ID, "Live touch calls", NotificationManager.IMPORTANCE_HIGH),
+            )
+        }
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(TouchNotificationIntents.EXTRA_LIVE_CALL_ID, callId)
+            putExtra(TouchNotificationIntents.EXTRA_LIVE_CALLER, callerUsername)
+        }
+        val pendingIntent = launchIntent?.let {
+            PendingIntent.getActivity(
+                context,
+                callId.hashCode(),
+                it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+        val notification = NotificationCompat.Builder(context, LIVE_CHANNEL_ID)
+            .setSmallIcon(context.applicationInfo.icon)
+            .setContentTitle("Live touch from $callerUsername")
+            .setContentText("Open Touch to accept or decline")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+        manager.notify(callId.hashCode(), notification)
+    }
+
+    fun dismiss(context: Context) {
+        context.getSystemService(NotificationManager::class.java).cancel(1001)
     }
 }
