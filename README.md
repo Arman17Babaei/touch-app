@@ -90,6 +90,29 @@ Install each debug APK, then enter on each device:
 Plain HTTP is permitted only by the debug manifests. Release builds require
 HTTPS unless their network policy is changed deliberately.
 
+## GitHub releases
+
+Publishing a GitHub Release builds, signs, and attaches one APK for `mobile` and
+one for `wear`, plus a `SHA256SUMS.txt` file. The release tag becomes the Android
+`versionName` (a leading `v` is removed), and the workflow run number becomes
+the monotonically increasing `versionCode`.
+
+Create a release keystore once and keep it backed up securely. Losing it means
+future versions cannot update installations signed with that key. Add these
+repository Actions secrets under **Settings > Secrets and variables > Actions**:
+
+- `ANDROID_KEYSTORE_BASE64`: the keystore file encoded with
+  `base64 -w 0 touch-release.jks`
+- `ANDROID_KEYSTORE_PASSWORD`: the keystore password
+- `ANDROID_KEY_ALIAS`: the key alias
+- `ANDROID_KEY_PASSWORD`: the key password
+
+Also add the five Firebase client values from the earlier configuration section
+as Actions **variables**, using the same names. The signing material is written
+only to the temporary GitHub runner and is never committed or uploaded. The
+workflow fails instead of publishing unsigned APKs when signing secrets are
+missing.
+
 The sender queues a non-silent recording in Room and WorkManager retries network
 failures. The recipient syncs on FCM, launch, and resume; it persists and dedupes
 before acknowledging. Fresh touches (up to five minutes old) auto-play FIFO when

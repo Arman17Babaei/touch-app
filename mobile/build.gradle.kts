@@ -4,6 +4,17 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+val releaseSigningStoreFile = providers.environmentVariable("TOUCH_SIGNING_STORE_FILE").orNull
+val releaseSigningStorePassword = providers.environmentVariable("TOUCH_SIGNING_STORE_PASSWORD").orNull
+val releaseSigningKeyAlias = providers.environmentVariable("TOUCH_SIGNING_KEY_ALIAS").orNull
+val releaseSigningKeyPassword = providers.environmentVariable("TOUCH_SIGNING_KEY_PASSWORD").orNull
+val releaseSigningEnabled = listOf(
+    releaseSigningStoreFile,
+    releaseSigningStorePassword,
+    releaseSigningKeyAlias,
+    releaseSigningKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "app.touch.mobile"
     compileSdk = 35
@@ -12,18 +23,35 @@ android {
         applicationId = "app.touch.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("TOUCH_VERSION_CODE").map(String::toInt).orElse(1).get()
+        versionName = providers.gradleProperty("TOUCH_VERSION_NAME").orElse("0.1.0").get()
 
-        resValue("string", "google_app_id", providers.gradleProperty("TOUCH_MOBILE_FIREBASE_APP_ID").orElse("").get())
-        resValue("string", "gcm_defaultSenderId", providers.gradleProperty("TOUCH_FIREBASE_SENDER_ID").orElse("").get())
-        resValue("string", "google_api_key", providers.gradleProperty("TOUCH_FIREBASE_API_KEY").orElse("").get())
-        resValue("string", "project_id", providers.gradleProperty("TOUCH_FIREBASE_PROJECT_ID").orElse("").get())
+        resValue("string", "google_app_id", providers.gradleProperty("TOUCH_MOBILE_FIREBASE_APP_ID").orElse(providers.environmentVariable("TOUCH_MOBILE_FIREBASE_APP_ID")).orElse("").get())
+        resValue("string", "gcm_defaultSenderId", providers.gradleProperty("TOUCH_FIREBASE_SENDER_ID").orElse(providers.environmentVariable("TOUCH_FIREBASE_SENDER_ID")).orElse("").get())
+        resValue("string", "google_api_key", providers.gradleProperty("TOUCH_FIREBASE_API_KEY").orElse(providers.environmentVariable("TOUCH_FIREBASE_API_KEY")).orElse("").get())
+        resValue("string", "project_id", providers.gradleProperty("TOUCH_FIREBASE_PROJECT_ID").orElse(providers.environmentVariable("TOUCH_FIREBASE_PROJECT_ID")).orElse("").get())
     }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    signingConfigs {
+        if (releaseSigningEnabled) {
+            create("release") {
+                storeFile = file(releaseSigningStoreFile!!)
+                storePassword = releaseSigningStorePassword
+                keyAlias = releaseSigningKeyAlias
+                keyPassword = releaseSigningKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningEnabled) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
