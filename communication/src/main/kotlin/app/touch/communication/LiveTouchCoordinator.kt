@@ -44,12 +44,14 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = OkHttpClient()
     private val player = LivePlaybackBuffer(context.applicationContext, scope)
+    private val audio = LiveAudioEngine(context.applicationContext, scope) { event -> socket?.send(event.toString()) }
     private val amplitude = AtomicInteger(0)
     private val _state = MutableStateFlow(LiveState())
     val state: StateFlow<LiveState> = _state
     private val _status = MutableStateFlow(LiveStatus.OFF)
     val status: StateFlow<LiveStatus> = _status
     val diagnostics: StateFlow<LiveDiagnostics> = player.diagnostics
+    val audioState: StateFlow<LiveAudioState> = audio.state
 
     @Volatile var lastError: String? = null
         private set
@@ -121,13 +123,22 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
     }
 
     fun hangUp() {
-        callId?.let { sendControl("hangup", it) }
-        closeLocal("hangup", LiveStatus.ENDED)
+        val id = callId ?: return
+        // OkHttp drops frames queued immediately before close on some devices. Give the
+        // control frame a short turn on the writer before closing the socket locally.
+        scope.launch {
+            val sent = socketOpen && (socket?.send(JSONObject().put("type", "hangup").put("callId", id).toString()) == true)
+            if (sent) delay(HANGUP_FLUSH_MILLIS)
+            closeLocal("hangup", LiveStatus.ENDED)
+        }
     }
 
     fun setAmplitude(value: Int) {
         amplitude.set(value.coerceIn(0, 255))
     }
+    fun setMicrophoneEnabled(enabled: Boolean) = audio.setMicrophoneEnabled(enabled)
+    fun setAudioOutputEnabled(allowSpeaker: Boolean) = audio.setOutputEnabled(allowSpeaker)
+    fun onAudioRouteChanged() = audio.onRouteChanged()
 
     private suspend fun openSocket(current: CommunicationSettings) {
         val url = current.backendUrl.replace(Regex("^http"), "ws") + "/v1/live"
@@ -186,6 +197,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
                     remoteStream = null
                     player.reset(samplePeriodMs)
                 }
+                "audioStart", "audioFrame", "audioEnd" -> audio.receive(event)
                 "peerUnavailable" -> update(LiveStatus.RECONNECTING, reason = "Peer unavailable")
                 "error" -> {
                     lastError = event.optString("code", "Live call error")
@@ -220,6 +232,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         reconnectDeadlineMs = 0
         update(LiveStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
         startStreaming()
+        callId?.let(audio::start)
     }
 
     private fun startStreaming() {
@@ -256,6 +269,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         }
         remoteStream = null
         player.reset(samplePeriodMs)
+        audio.stop()
     }
 
     private fun flush() {
@@ -274,9 +288,22 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
 
     private fun receive(event: JSONObject) {
         val values = event.optJSONArray("amplitudes") ?: return
-        if (event.optString("streamId") != remoteStream || event.optInt("startIndex", -1) != expectedIndex) {
+        if (event.optString("streamId") != remoteStream) {
             player.outOfOrder()
             return
+        }
+        val startIndex = event.optInt("startIndex", -1)
+        if (startIndex < expectedIndex) {
+            // Late duplicates are never replayed.
+            player.outOfOrder()
+            return
+        }
+        if (startIndex > expectedIndex) {
+            // The server queue is bounded, so a congested connection can lose a batch.
+            // Resume at the next sequenced batch instead of making the remainder of the
+            // live haptic stream permanently unplayable.
+            player.gap(startIndex - expectedIndex)
+            expectedIndex = startIndex
         }
         expectedIndex += values.length()
         val samples = List(values.length()) { values.getInt(it) }
@@ -359,6 +386,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         const val SAMPLE_PERIOD_MS = 10
         const val BATCH_SAMPLES = 10
         const val RECONNECT_MILLIS = 30_000L
+        const val HANGUP_FLUSH_MILLIS = 150L
     }
 }
 
@@ -402,6 +430,11 @@ private class LivePlaybackBuffer(context: Context, private val scope: CoroutineS
     }
 
     fun outOfOrder() { synchronized(lock) { outOfOrder++ }; publish() }
+
+    fun gap(@Suppress("UNUSED_PARAMETER") skippedSamples: Int) {
+        synchronized(lock) { outOfOrder++ }
+        publish()
+    }
 
     private suspend fun playLoop() {
         while (true) {

@@ -163,6 +163,33 @@ func TestSendIdempotencyFIFOAndAck(t *testing.T) {
 	}
 }
 
+func TestDurableAudioIsOptionalValidatedAndReturned(t *testing.T) {
+	server, _, _ := testServer(t)
+	handler := server.Handler()
+	register(t, handler, phoneID, "phone", "phone", "")
+	register(t, handler, watchID, "watch", "watch", "")
+	body := map[string]any{
+		"clientMessageId": messageID, "recipientUsername": "watch", "samplePeriodMs": 10, "amplitudes": []int{1},
+		"audio": map[string]any{"codec": "aac-lc", "sampleRateHz": 16000, "channelCount": 1, "durationMs": 20, "data": []byte{1, 2, 3}},
+	}
+	if got := request(t, handler, http.MethodPost, "/v1/touches", phoneID, body); got.Code != http.StatusAccepted {
+		t.Fatalf("send audio: %d %s", got.Code, got.Body.String())
+	}
+	inbox := request(t, handler, http.MethodGet, "/v1/touches?state=pending", watchID, nil)
+	var response pendingTouchesResponse
+	if err := json.Unmarshal(inbox.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Touches) != 1 || response.Touches[0].Audio == nil || string(response.Touches[0].Audio.Data) != string([]byte{1, 2, 3}) {
+		t.Fatalf("audio was not retained: %#v", response.Touches)
+	}
+	body["clientMessageId"] = secondID
+	body["audio"] = map[string]any{"codec": "aac-lc", "sampleRateHz": 16000, "channelCount": 2, "durationMs": 20, "data": []byte{1}}
+	if got := request(t, handler, http.MethodPost, "/v1/touches", phoneID, body); got.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid audio, got %d", got.Code)
+	}
+}
+
 func TestTouchValidationAndMissingRecipient(t *testing.T) {
 	server, _, _ := testServer(t)
 	handler := server.Handler()

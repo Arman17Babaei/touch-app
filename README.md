@@ -1,6 +1,6 @@
 # Touch
 
-Touch is a standalone Android and Wear OS haptic messenger. Each app can record,
+Touch is a standalone Android and Wear OS haptic-and-voice messenger. Each app can record,
 play, queue, send, receive, and retain touches independently; it does not use the
 Wear Data Layer.
 
@@ -169,6 +169,19 @@ The WebSocket endpoint is `GET /v1/live`, authenticated with the same
 and `ended` responses. Streaming continues to use `start`, `samples`, and `end`
 for compatibility with existing clients. `startIndex` is zero-based and must be
 present even for the first batch.
+
+## Voice audio and privacy
+
+Recording a touch also records an optional mono 16 kHz AAC-LC voice attachment, capped at
+30 seconds and 256 KiB. The microphone is on by default for a recording or connected Live
+call when Android grants `RECORD_AUDIO`; the Mic control stops capture without disabling
+haptics. Permission denial leaves the app usable as a haptic-only messenger.
+
+Incoming voice auto-plays only on wired, USB, Bluetooth communication, BLE headset, or
+hearing-aid routes. It never auto-plays on speakers, car/cast/HDMI routes, or generic
+Bluetooth media devices. **Audio** / **Play audio** explicitly permits speaker output only
+for the current item or call. Removing headphones stops voice immediately. Live voice is
+foreground-only and ephemeral; durable voice is the optional `audio` API object.
 
 ## Tests
 

@@ -27,14 +27,16 @@ type LiveHub struct {
 }
 
 type liveClient struct {
-	id        string
-	username  string
-	conn      *websocket.Conn
-	send      chan []byte
-	done      chan struct{}
-	peerID    string
-	streamID  string
-	nextIndex int
+	id                string
+	username          string
+	conn              *websocket.Conn
+	send              chan []byte
+	done              chan struct{}
+	peerID            string
+	streamID          string
+	nextIndex         int
+	audioStreamID     string
+	nextAudioSequence int
 }
 
 type liveCall struct {
@@ -61,6 +63,11 @@ type liveEvent struct {
 	SamplePeriodMs    int    `json:"samplePeriodMs,omitempty"`
 	StartIndex        *int   `json:"startIndex,omitempty"`
 	Amplitudes        []int  `json:"amplitudes,omitempty"`
+	Codec             string `json:"codec,omitempty"`
+	SampleRateHz      int    `json:"sampleRateHz,omitempty"`
+	ChannelCount      int    `json:"channelCount,omitempty"`
+	AudioSequence     *int   `json:"audioSequence,omitempty"`
+	AudioData         []byte `json:"audioData,omitempty"`
 	Code              string `json:"code,omitempty"`
 }
 
@@ -90,7 +97,10 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LiveHub) connect(ctx context.Context, conn *websocket.Conn, installation Installation, store *Store) {
-	client := &liveClient{id: installation.ID, username: installation.Handle, conn: conn, send: make(chan []byte, 32), done: make(chan struct{})}
+	// Audio can briefly burst while a handset is busy. Keep a bounded but large
+	// enough relay queue so an ordinary burst does not create a permanent gap in
+	// the separately sequenced haptic stream.
+	client := &liveClient{id: installation.ID, username: installation.Handle, conn: conn, send: make(chan []byte, 256), done: make(chan struct{})}
 	h.mu.Lock()
 	if old := h.clients[client.id]; old != nil {
 		_ = old.conn.Close()
@@ -147,9 +157,58 @@ func (h *LiveHub) connect(ctx context.Context, conn *websocket.Conn, installatio
 			h.resumeCall(client, event.CallID)
 		case "hangup":
 			h.finishCall(client, event.CallID, "hangup")
+		case "audioStart", "audioFrame", "audioEnd":
+			h.handleAudio(client, event)
 		default:
 			h.handleLegacy(ctx, client, event, store)
 		}
+	}
+}
+
+// Audio is accepted only for an already accepted call. This deliberately uses a
+// separate stream from touch samples so a bad voice frame cannot interrupt haptics.
+func (h *LiveHub) handleAudio(client *liveClient, event liveEvent) {
+	h.mu.Lock()
+	call := h.calls[event.CallID]
+	if call == nil || !call.accepted || (call.callerID != client.id && call.recipientID != client.id) {
+		h.mu.Unlock()
+		h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_AUDIO"})
+		return
+	}
+	peerID := call.callerID
+	if peerID == client.id {
+		peerID = call.recipientID
+	}
+	peer := h.clients[peerID]
+	switch event.Type {
+	case "audioStart":
+		if !uuidPattern.MatchString(event.StreamID) || event.Codec != "aac-lc" || event.SampleRateHz != 16000 || event.ChannelCount != 1 {
+			h.mu.Unlock()
+			h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_AUDIO"})
+			return
+		}
+		client.audioStreamID, client.nextAudioSequence = event.StreamID, 0
+	case "audioFrame":
+		if event.StreamID != client.audioStreamID || event.AudioSequence == nil || *event.AudioSequence != client.nextAudioSequence || len(event.AudioData) == 0 || len(event.AudioData) > 16*1024 {
+			h.mu.Unlock()
+			h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_AUDIO"})
+			return
+		}
+		client.nextAudioSequence++
+	case "audioEnd":
+		if event.StreamID != client.audioStreamID {
+			h.mu.Unlock()
+			h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_AUDIO"})
+			return
+		}
+		client.audioStreamID, client.nextAudioSequence = "", 0
+	}
+	h.mu.Unlock()
+	if peer != nil {
+		raw, _ := json.Marshal(event)
+		h.send(peer, raw)
+	} else {
+		h.reply(client, liveEvent{Type: "peerUnavailable", CallID: event.CallID})
 	}
 }
 

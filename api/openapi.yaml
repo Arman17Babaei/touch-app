@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Touch API
   version: 1.0.0
-  description: Standalone phone and watch touch delivery API.
+  description: Standalone phone and watch touch delivery API with optional durable voice attachments.
 servers:
   - url: http://localhost:8080
 paths:
@@ -85,12 +85,18 @@ paths:
         - { $ref: '#/components/schemas/LiveStart' }
         - { $ref: '#/components/schemas/LiveSamples' }
         - { $ref: '#/components/schemas/LiveEnd' }
+        - { $ref: '#/components/schemas/LiveAudioStart' }
+        - { $ref: '#/components/schemas/LiveAudioFrame' }
+        - { $ref: '#/components/schemas/LiveAudioEnd' }
       x-websocket-server-messages:
         - { $ref: '#/components/schemas/LiveStart' }
         - { $ref: '#/components/schemas/LiveSamples' }
         - { $ref: '#/components/schemas/LiveEnd' }
         - { $ref: '#/components/schemas/LivePeerUnavailable' }
         - { $ref: '#/components/schemas/LiveError' }
+        - { $ref: '#/components/schemas/LiveAudioStart' }
+        - { $ref: '#/components/schemas/LiveAudioFrame' }
+        - { $ref: '#/components/schemas/LiveAudioEnd' }
       responses:
         '101': { description: WebSocket upgrade accepted. }
         '401': { $ref: '#/components/responses/Error' }
@@ -148,6 +154,7 @@ components:
         recipientUsername: { $ref: '#/components/schemas/Username' }
         samplePeriodMs: { type: integer, minimum: 1, maximum: 100 }
         amplitudes: { type: array, minItems: 1, maxItems: 3000, items: { type: integer, minimum: 0, maximum: 255 } }
+        audio: { $ref: '#/components/schemas/AudioAttachment' }
     TouchAccepted:
       type: object
       required: [touchId, clientMessageId, acceptedAtMs, duplicate]
@@ -167,6 +174,7 @@ components:
         amplitudes: { type: array, items: { type: integer } }
         createdAtMs: { type: integer, format: int64 }
         expiresAtMs: { type: integer, format: int64 }
+        audio: { $ref: '#/components/schemas/AudioAttachment' }
     PendingTouches:
       type: object
       required: [touches]
@@ -201,6 +209,32 @@ components:
       properties:
         type: { type: string, const: end }
         streamId: { type: string, format: uuid }
+    LiveAudioStart:
+      type: object
+      required: [type, callId, streamId, codec, sampleRateHz, channelCount]
+      properties:
+        type: { type: string, const: audioStart }
+        callId: { $ref: '#/components/schemas/Uuid' }
+        streamId: { $ref: '#/components/schemas/Uuid' }
+        codec: { type: string, const: aac-lc }
+        sampleRateHz: { type: integer, const: 16000 }
+        channelCount: { type: integer, const: 1 }
+    LiveAudioFrame:
+      type: object
+      required: [type, callId, streamId, audioSequence, audioData]
+      properties:
+        type: { type: string, const: audioFrame }
+        callId: { $ref: '#/components/schemas/Uuid' }
+        streamId: { $ref: '#/components/schemas/Uuid' }
+        audioSequence: { type: integer, minimum: 0 }
+        audioData: { type: string, format: byte, description: One AAC access unit, maximum decoded size 16 KiB. }
+    LiveAudioEnd:
+      type: object
+      required: [type, callId, streamId]
+      properties:
+        type: { type: string, const: audioEnd }
+        callId: { $ref: '#/components/schemas/Uuid' }
+        streamId: { $ref: '#/components/schemas/Uuid' }
     LivePeerUnavailable:
       type: object
       additionalProperties: false
@@ -212,7 +246,17 @@ components:
       required: [type, code]
       properties:
         type: { type: string, const: error }
-        code: { type: string, enum: [INVALID_EVENT, INVALID_START, NO_ACTIVE_STREAM, INVALID_SAMPLES] }
+        code: { type: string, enum: [INVALID_EVENT, INVALID_START, NO_ACTIVE_STREAM, INVALID_SAMPLES, INVALID_AUDIO] }
+    AudioAttachment:
+      type: object
+      additionalProperties: false
+      required: [codec, sampleRateHz, channelCount, durationMs, data]
+      properties:
+        codec: { type: string, const: aac-lc }
+        sampleRateHz: { type: integer, const: 16000 }
+        channelCount: { type: integer, const: 1 }
+        durationMs: { type: integer, minimum: 1, maximum: 30000 }
+        data: { type: string, format: byte, description: Base64 MP4/AAC-LC data, maximum decoded size 256 KiB. }
     ErrorResponse:
       type: object
       required: [error]

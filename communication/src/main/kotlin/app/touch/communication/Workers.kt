@@ -104,6 +104,11 @@ internal class InboxSyncWorker(context: Context, params: WorkerParameters) : Cor
                         amplitudes = remote.amplitudes.map { it.toByte() }.toByteArray(),
                         createdAt = remote.createdAtMs,
                         receivedAt = System.currentTimeMillis(),
+                        audioCodec = remote.audio?.codec,
+                        audioSampleRateHz = remote.audio?.sampleRateHz,
+                        audioChannelCount = remote.audio?.channelCount,
+                        audioDurationMs = remote.audio?.durationMs,
+                        audioData = remote.audio?.data,
                     ),
                 )
                 if (result != -1L) inserted++

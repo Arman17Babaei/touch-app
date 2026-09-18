@@ -109,9 +109,13 @@ func (s *Server) sendTouch(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, errorInvalidRequest, err.Error())
 		return
 	}
+	if err := validateAudio(input.Audio); err != nil {
+		writeAPIError(w, http.StatusBadRequest, errorInvalidRequest, err.Error())
+		return
+	}
 	created, token, isNew, err := s.store.CreateTouch(r.Context(), senderID, TouchMessage{
 		ClientMessageID: input.ClientMessageID, RecipientHandle: input.RecipientUsername,
-		SamplePeriodMillis: input.SamplePeriodMs, Amplitudes: input.Amplitudes,
+		SamplePeriodMillis: input.SamplePeriodMs, Amplitudes: input.Amplitudes, Audio: input.Audio,
 	}, s.now())
 	if errors.Is(err, errNotFound) || errors.Is(errors.Unwrap(err), errNotFound) {
 		writeAPIError(w, http.StatusNotFound, errorRecipientNotFound, "recipient username is not registered")
@@ -134,6 +138,22 @@ func (s *Server) sendTouch(w http.ResponseWriter, r *http.Request) {
 		TouchID: created.ID, ClientMessageID: created.ClientMessageID,
 		AcceptedAtMs: created.CreatedAt, Duplicate: !isNew,
 	})
+}
+
+func validateAudio(audio *audioPayload) error {
+	if audio == nil {
+		return nil
+	}
+	if audio.Codec != "aac-lc" || audio.SampleRateHz != 16000 || audio.ChannelCount != 1 {
+		return fmt.Errorf("audio must be mono 16 kHz aac-lc")
+	}
+	if audio.DurationMs < 1 || audio.DurationMs > 30_000 {
+		return fmt.Errorf("audio duration must be 1-30000 ms")
+	}
+	if len(audio.Data) == 0 || len(audio.Data) > 256*1024 {
+		return fmt.Errorf("audio data must be 1-262144 bytes")
+	}
+	return nil
 }
 
 func (s *Server) pendingTouches(w http.ResponseWriter, r *http.Request) {

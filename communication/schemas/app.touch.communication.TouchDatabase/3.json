@@ -1,0 +1,185 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "5e74a7662699fab126244d7b31cbae4b",
+    "entities": [
+      {
+        "tableName": "inbox_touches",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `clientMessageId` TEXT NOT NULL, `senderUsername` TEXT NOT NULL, `samplePeriodMillis` INTEGER NOT NULL, `amplitudes` BLOB NOT NULL, `createdAt` INTEGER NOT NULL, `receivedAt` INTEGER NOT NULL, `playedAt` INTEGER, `audioCodec` TEXT, `audioSampleRateHz` INTEGER, `audioChannelCount` INTEGER, `audioDurationMs` INTEGER, `audioData` BLOB, `audioPlayedAt` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clientMessageId",
+            "columnName": "clientMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "senderUsername",
+            "columnName": "senderUsername",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "samplePeriodMillis",
+            "columnName": "samplePeriodMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amplitudes",
+            "columnName": "amplitudes",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivedAt",
+            "columnName": "receivedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playedAt",
+            "columnName": "playedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioCodec",
+            "columnName": "audioCodec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioSampleRateHz",
+            "columnName": "audioSampleRateHz",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioChannelCount",
+            "columnName": "audioChannelCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioDurationMs",
+            "columnName": "audioDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioData",
+            "columnName": "audioData",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "audioPlayedAt",
+            "columnName": "audioPlayedAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "outbox_touches",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`clientMessageId` TEXT NOT NULL, `recipientUsername` TEXT NOT NULL, `samplePeriodMillis` INTEGER NOT NULL, `amplitudes` BLOB NOT NULL, `createdAt` INTEGER NOT NULL, `status` TEXT NOT NULL, `error` TEXT, `serverTouchId` TEXT, `audioCodec` TEXT, `audioSampleRateHz` INTEGER, `audioChannelCount` INTEGER, `audioDurationMs` INTEGER, `audioData` BLOB, PRIMARY KEY(`clientMessageId`))",
+        "fields": [
+          {
+            "fieldPath": "clientMessageId",
+            "columnName": "clientMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipientUsername",
+            "columnName": "recipientUsername",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "samplePeriodMillis",
+            "columnName": "samplePeriodMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amplitudes",
+            "columnName": "amplitudes",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "error",
+            "columnName": "error",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "serverTouchId",
+            "columnName": "serverTouchId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioCodec",
+            "columnName": "audioCodec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioSampleRateHz",
+            "columnName": "audioSampleRateHz",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioChannelCount",
+            "columnName": "audioChannelCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioDurationMs",
+            "columnName": "audioDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "audioData",
+            "columnName": "audioData",
+            "affinity": "BLOB"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "clientMessageId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5e74a7662699fab126244d7b31cbae4b')"
+    ]
+  }
+}

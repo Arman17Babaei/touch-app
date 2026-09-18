@@ -7,6 +7,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -51,6 +54,8 @@ import androidx.wear.compose.material.ButtonDefaults
 import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import app.touch.communication.CommunicationSettings
+import app.touch.communication.AudioAttachment
+import app.touch.communication.RecordedAudioCapture
 import app.touch.communication.InboxTouch
 import app.touch.communication.LiveStatus
 import app.touch.communication.TouchCommunication
@@ -67,6 +72,11 @@ class MainActivity : ComponentActivity() {
     private val communication by lazy { TouchCommunication.get(this) }
     private val incomingInvite = MutableStateFlow(TouchNotificationIntents.liveInvite(intent))
     private val syncHandler = Handler(Looper.getMainLooper())
+    private val audioManager by lazy { getSystemService(AudioManager::class.java) }
+    private val audioDevices = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) = communication.onAudioRouteChanged()
+        override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) = communication.onAudioRouteChanged()
+    }
     private val syncInbox = object : Runnable {
         override fun run() {
             communication.syncInbox()
@@ -87,11 +97,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         communication.onForeground()
+        audioManager.registerAudioDeviceCallback(audioDevices, null)
         syncHandler.post(syncInbox)
     }
 
     override fun onPause() {
         syncHandler.removeCallbacks(syncInbox)
+        audioManager.unregisterAudioDeviceCallback(audioDevices)
         communication.onBackground()
         super.onPause()
     }
@@ -101,6 +113,8 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         incomingInvite.value = TouchNotificationIntents.liveInvite(intent)
     }
+
+    fun requestMicrophonePermission() = requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
 }
 
 private data class DebugSetup(val backend: String, val username: String, val peer: String)
@@ -207,15 +221,23 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
     val scope = rememberCoroutineScope()
     val recorder = remember(communication) { TouchRecorder() }
     val player = remember { AndroidTouchPlayer(context.applicationContext) }
+    val audioCapture = remember { RecordedAudioCapture(context.applicationContext) }
     val outbox by communication.outbox.collectAsState(initial = emptyList())
     var recording by remember { mutableStateOf(false) }
     var elapsed by remember { mutableIntStateOf(0) }
     var touch by remember { mutableStateOf<Touch?>(null) }
     var sentId by remember { mutableStateOf<String?>(null) }
+    var audio by remember { mutableStateOf<AudioAttachment?>(null) }
+    var microphoneEnabled by remember { mutableStateOf(false) }
 
     fun finish(includePartial: Boolean) {
+        // The sampling effect and the STOP click can finish on adjacent main-loop
+        // turns. Never let the second completion overwrite the captured AAC with null.
+        if (!recorder.isRecording && !recording) return
         if (includePartial && recorder.isRecording) recorder.sample()
         touch = recorder.stop()
+        audio = audioCapture.stop()
+        microphoneEnabled = false
         elapsed = touch?.durationMillis?.toInt() ?: 0
         recording = false
         sentId = null
@@ -234,6 +256,7 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
     DisposableEffect(Unit) {
         onDispose {
             player.cancel()
+            audioCapture.cancel()
             communication.setInteractionBusy(false)
         }
     }
@@ -258,6 +281,7 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
         }) { Text(if (recording) "TOUCH" else sendState ?: formatDuration(elapsed)) }
 
         if (recording) {
+            Text(if (microphoneEnabled) "MIC ON" else "MIC OFF", fontSize = 9.sp, modifier = Modifier.clickable { microphoneEnabled = !microphoneEnabled; audioCapture.setMicrophoneEnabled(microphoneEnabled) }.padding(4.dp))
             Button(onClick = { finish(true) }, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(52.dp)) { Text("STOP", fontSize = 10.sp) }
         } else {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -265,6 +289,10 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
                     player.cancel()
                     communication.setInteractionBusy(true)
                     recorder.start()
+                    audio = null
+                    val permitted = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                    microphoneEnabled = audioCapture.start(permitted)
+                    if (!permitted) (context as? MainActivity)?.requestMicrophonePermission()
                     elapsed = 0
                     recording = true
                 }, colors = ButtonDefaults.buttonColors(backgroundColor = Coral), modifier = Modifier.size(45.dp)) { Text("REC", fontSize = 9.sp) }
@@ -273,10 +301,11 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
                         communication.setInteractionBusy(true)
                         try {
                             if (player.play(recorded)) delay(recorded.durationMillis + 100)
+                            communication.previewAudio(audio, allowSpeaker = true)
                         } finally { communication.setInteractionBusy(false) }
                     } }
                 }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("PLAY", fontSize = 8.sp) }
-                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it) } } }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("SEND", fontSize = 8.sp) }
+                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it, audio) } } }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("SEND", fontSize = 8.sp) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(top = 3.dp)) {
                 Text("Inbox", fontSize = 10.sp, modifier = Modifier.clickable(onClick = onInbox).padding(4.dp))
@@ -289,7 +318,9 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
 
 @Composable
 private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, onBack: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val live by communication.liveState.collectAsState()
+    val audio by communication.liveAudioState.collectAsState()
     var elapsed by remember { mutableIntStateOf(0) }
     LaunchedEffect(autoStart) { if (autoStart) communication.startLive() }
     LaunchedEffect(live.connectedAtMs) {
@@ -337,16 +368,20 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
                     } finally { communication.setLiveAmplitude(0) }
                 },
         ) { Text(if (connected) "TOUCH" else label, fontSize = 11.sp) }
+        if (connected) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (audio.microphoneEnabled) "MIC ON" else "MIC OFF", fontSize = 9.sp, modifier = Modifier.clickable { communication.setLiveMicrophoneEnabled(!audio.microphoneEnabled) }.padding(5.dp))
+            Text(if (audio.outputEnabled) if (audio.privateRoute) "HEADPHONES" else "SPEAKER" else "PLAY AUDIO", fontSize = 9.sp, modifier = Modifier.clickable { communication.setLiveAudioOutputEnabled(!audio.outputEnabled) }.padding(5.dp))
+        }
         when (live.status) {
             LiveStatus.INCOMING -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = communication::declineLive, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal)) { Text("NO", fontSize = 9.sp) }
-                Button(onClick = communication::acceptLive, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("YES", fontSize = 9.sp) }
+                Button(onClick = { if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) (context as? MainActivity)?.requestMicrophonePermission(); communication.acceptLive() }, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("YES", fontSize = 9.sp) }
             }
             LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.CONNECTED, LiveStatus.RECONNECTING ->
                 Button(onClick = communication::stopLive, modifier = Modifier.size(52.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("END", fontSize = 9.sp) }
             LiveStatus.ENDED, LiveStatus.ERROR, LiveStatus.OFF -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Back", modifier = Modifier.clickable(onClick = onBack).padding(10.dp), fontSize = 10.sp)
-                Text("Call again", color = Coral, modifier = Modifier.clickable(onClick = communication::startLive).padding(10.dp), fontSize = 10.sp)
+                Text("Call again", color = Coral, modifier = Modifier.clickable { if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) (context as? MainActivity)?.requestMicrophonePermission(); communication.startLive() }.padding(10.dp), fontSize = 10.sp)
             }
         }
     }
@@ -357,6 +392,7 @@ private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
     val inbox by communication.inbox.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var confirmingClear by remember { mutableStateOf(false) }
+    var playingAudioId by remember { mutableStateOf<String?>(null) }
     if (confirmingClear) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize().padding(24.dp)) {
             Text("Clear all touches?", fontSize = 12.sp)
@@ -378,6 +414,10 @@ private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
                     Text("${formatDuration(item.touch.durationMillis.toInt())} · ${if (item.playedAt == null) "new" else "played"}", fontSize = 9.sp, color = Color.White.copy(alpha = .65f))
                 }
                 Button(onClick = { scope.launch { communication.play(item) } }, modifier = Modifier.size(38.dp)) { Text("▶", fontSize = 12.sp) }
+				item.audio?.let { Button(onClick = {
+					if (playingAudioId == item.id) { communication.stopAudio(); playingAudioId = null }
+					else scope.launch { if (communication.playAudio(item, allowSpeaker = true)) playingAudioId = item.id }
+				}, modifier = Modifier.size(38.dp)) { Text(if (playingAudioId == item.id) "×" else "♪", fontSize = 12.sp) } }
             }
         }
         item { Text("Back", color = Mint, modifier = Modifier.clickable(onClick = onBack).padding(10.dp)) }

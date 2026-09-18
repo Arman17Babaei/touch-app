@@ -14,10 +14,21 @@ type installationResponse struct {
 }
 
 type touchSendRequest struct {
-	ClientMessageID   string `json:"clientMessageId"`
-	RecipientUsername string `json:"recipientUsername"`
-	SamplePeriodMs    int    `json:"samplePeriodMs"`
-	Amplitudes        []int  `json:"amplitudes"`
+	ClientMessageID   string        `json:"clientMessageId"`
+	RecipientUsername string        `json:"recipientUsername"`
+	SamplePeriodMs    int           `json:"samplePeriodMs"`
+	Amplitudes        []int         `json:"amplitudes"`
+	Audio             *audioPayload `json:"audio,omitempty"`
+}
+
+// audioPayload is intentionally optional: a touch without audio remains a valid v1 message.
+// []byte uses JSON base64 encoding, keeping the HTTP API compact and unambiguous.
+type audioPayload struct {
+	Codec        string `json:"codec"`
+	SampleRateHz int    `json:"sampleRateHz"`
+	ChannelCount int    `json:"channelCount"`
+	DurationMs   int    `json:"durationMs"`
+	Data         []byte `json:"data"`
 }
 
 type touchAcceptedResponse struct {
@@ -28,13 +39,14 @@ type touchAcceptedResponse struct {
 }
 
 type pendingTouchResponse struct {
-	TouchID         string `json:"touchId"`
-	ClientMessageID string `json:"clientMessageId"`
-	SenderUsername  string `json:"senderUsername"`
-	SamplePeriodMs  int    `json:"samplePeriodMs"`
-	Amplitudes      []int  `json:"amplitudes"`
-	CreatedAtMs     int64  `json:"createdAtMs"`
-	ExpiresAtMs     int64  `json:"expiresAtMs"`
+	TouchID         string        `json:"touchId"`
+	ClientMessageID string        `json:"clientMessageId"`
+	SenderUsername  string        `json:"senderUsername"`
+	SamplePeriodMs  int           `json:"samplePeriodMs"`
+	Amplitudes      []int         `json:"amplitudes"`
+	CreatedAtMs     int64         `json:"createdAtMs"`
+	ExpiresAtMs     int64         `json:"expiresAtMs"`
+	Audio           *audioPayload `json:"audio,omitempty"`
 }
 
 type pendingTouchesResponse struct {
@@ -84,5 +96,6 @@ func toPendingTouchResponse(item TouchMessage) pendingTouchResponse {
 		Amplitudes:      item.Amplitudes,
 		CreatedAtMs:     item.CreatedAt,
 		ExpiresAtMs:     item.ExpiresAt,
+		Audio:           item.Audio,
 	}
 }

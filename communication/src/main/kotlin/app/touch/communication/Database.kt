@@ -24,6 +24,12 @@ internal data class InboxTouchEntity(
     val createdAt: Long,
     val receivedAt: Long,
     val playedAt: Long? = null,
+    val audioCodec: String? = null,
+    val audioSampleRateHz: Int? = null,
+    val audioChannelCount: Int? = null,
+    val audioDurationMs: Int? = null,
+    val audioData: ByteArray? = null,
+    val audioPlayedAt: Long? = null,
 )
 
 @Entity(tableName = "outbox_touches")
@@ -36,6 +42,11 @@ internal data class OutboxTouchEntity(
     val status: String = OutboxStatus.QUEUED.name,
     val error: String? = null,
     val serverTouchId: String? = null,
+    val audioCodec: String? = null,
+    val audioSampleRateHz: Int? = null,
+    val audioChannelCount: Int? = null,
+    val audioDurationMs: Int? = null,
+    val audioData: ByteArray? = null,
 )
 
 @Dao
@@ -70,6 +81,8 @@ internal interface TouchDao {
 
     @Query("UPDATE inbox_touches SET playedAt = :playedAt WHERE id = :id")
     suspend fun markPlayed(id: String, playedAt: Long)
+    @Query("UPDATE inbox_touches SET audioPlayedAt = :playedAt WHERE id = :id")
+    suspend fun markAudioPlayed(id: String, playedAt: Long)
 
     @Query("DELETE FROM inbox_touches")
     suspend fun clearInbox()
@@ -83,7 +96,7 @@ internal interface TouchDao {
 
 @Database(
     entities = [InboxTouchEntity::class, OutboxTouchEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 internal abstract class TouchDatabase : RoomDatabase() {
@@ -97,9 +110,22 @@ internal abstract class TouchDatabase : RoomDatabase() {
                 context.applicationContext,
                 TouchDatabase::class.java,
                 "touch-communication.db",
-            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
         private val MIGRATION_1_2 = object : Migration(1, 2) { override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE inbox_touches ADD COLUMN clientMessageId TEXT NOT NULL DEFAULT ''"); db.execSQL("ALTER TABLE outbox_touches ADD COLUMN serverTouchId TEXT") } }
+        private val MIGRATION_2_3 = object : Migration(2, 3) { override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioCodec TEXT")
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioSampleRateHz INTEGER")
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioChannelCount INTEGER")
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioDurationMs INTEGER")
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioData BLOB")
+            db.execSQL("ALTER TABLE inbox_touches ADD COLUMN audioPlayedAt INTEGER")
+            db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioCodec TEXT")
+            db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioSampleRateHz INTEGER")
+            db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioChannelCount INTEGER")
+            db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioDurationMs INTEGER")
+            db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioData BLOB")
+        } }
     }
 }
 
@@ -110,6 +136,8 @@ internal fun InboxTouchEntity.toModel() = InboxTouch(
     createdAt = createdAt,
     receivedAt = receivedAt,
     playedAt = playedAt,
+    audio = audioAttachment(audioCodec, audioSampleRateHz, audioChannelCount, audioDurationMs, audioData),
+    audioPlayedAt = audioPlayedAt,
 )
 
 internal fun OutboxTouchEntity.toModel() = OutboxTouch(
@@ -119,4 +147,8 @@ internal fun OutboxTouchEntity.toModel() = OutboxTouch(
     createdAt = createdAt,
     status = OutboxStatus.valueOf(status),
     error = error,
+    audio = audioAttachment(audioCodec, audioSampleRateHz, audioChannelCount, audioDurationMs, audioData),
 )
+
+internal fun audioAttachment(codec: String?, rate: Int?, channels: Int?, duration: Int?, data: ByteArray?): AudioAttachment? =
+    if (codec == null || rate == null || channels == null || duration == null || data == null) null else AudioAttachment(codec, rate, channels, duration, data)

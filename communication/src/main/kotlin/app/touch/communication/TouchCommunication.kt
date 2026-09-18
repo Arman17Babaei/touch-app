@@ -29,6 +29,7 @@ class TouchCommunication private constructor(private val context: Context) {
     val outbox: Flow<List<OutboxTouch>> = dao.observeOutbox().map { items -> items.map(OutboxTouchEntity::toModel) }
     val liveStatus = live.status
 	val liveState = live.state
+    val liveAudioState = live.audioState
 
     fun startLive() = live.startCall()
     fun prepareIncomingLive(callId: String, callerUsername: String) = live.prepareIncoming(callId, callerUsername)
@@ -36,6 +37,9 @@ class TouchCommunication private constructor(private val context: Context) {
     fun declineLive() = live.decline()
     fun stopLive() = live.hangUp()
     fun setLiveAmplitude(amplitude: Int) = live.setAmplitude(amplitude)
+    fun setLiveMicrophoneEnabled(enabled: Boolean) = live.setMicrophoneEnabled(enabled)
+    fun setLiveAudioOutputEnabled(allowSpeaker: Boolean) = live.setAudioOutputEnabled(allowSpeaker)
+    fun onAudioRouteChanged() = live.onAudioRouteChanged()
     fun onBackground() {
         if (live.state.value.status in setOf(
                 LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.INCOMING,
@@ -64,9 +68,9 @@ class TouchCommunication private constructor(private val context: Context) {
         CommunicationWork.enqueueOutbox(context)
     }
 
-    suspend fun send(touch: Touch): String = enqueue(touch, UUID.randomUUID().toString())
+    suspend fun send(touch: Touch, audio: AudioAttachment? = null): String = enqueue(touch, UUID.randomUUID().toString(), audio)
 
-    internal suspend fun enqueue(touch: Touch, id: String): String {
+    internal suspend fun enqueue(touch: Touch, id: String, audio: AudioAttachment? = null): String {
         require(!touch.isSilent && touch.amplitudes.isNotEmpty())
         val current = settingsStore.current()
         require(current.isConfigured) { "Communication setup is incomplete" }
@@ -77,6 +81,11 @@ class TouchCommunication private constructor(private val context: Context) {
                 samplePeriodMillis = touch.samplePeriodMillis,
                 amplitudes = touch.toBytes(),
                 createdAt = System.currentTimeMillis(),
+                audioCodec = audio?.codec,
+                audioSampleRateHz = audio?.sampleRateHz,
+                audioChannelCount = audio?.channelCount,
+                audioDurationMs = audio?.durationMs,
+                audioData = audio?.data,
             ),
         )
         CommunicationWork.enqueueOutbox(context)
@@ -99,9 +108,13 @@ class TouchCommunication private constructor(private val context: Context) {
     }
 
     suspend fun play(item: InboxTouch): Boolean = PlaybackCoordinator.playOne(context, this, item.id, item.touch)
+    suspend fun playAudio(item: InboxTouch, allowSpeaker: Boolean): Boolean = AudioPlaybackCoordinator.play(context, dao, item, allowSpeaker)
+    suspend fun previewAudio(audio: AudioAttachment?, allowSpeaker: Boolean): Boolean = AudioPlaybackCoordinator.playAttachment(context, audio, allowSpeaker)
+    fun stopAudio() = AudioPlaybackCoordinator.stop()
 
     suspend fun clearInbox() {
         PlaybackCoordinator.cancel()
+        AudioPlaybackCoordinator.stop()
         dao.clearInbox()
         TouchNotifications.dismiss(context)
     }
@@ -156,6 +169,7 @@ internal object PlaybackCoordinator {
             communication.dao.freshUnplayed(cutoff).sortedWith(compareBy(InboxTouchEntity::createdAt, InboxTouchEntity::id)).forEach { item ->
                 if (interactionBusy.get()) return
                 playOne(context, communication, item.id, item.amplitudes.toTouch(item.samplePeriodMillis))
+				item.audioData?.let { audio -> AudioPlaybackCoordinator.play(context, communication.dao, item.toModel(), allowSpeaker = false) }
             }
         }
     }

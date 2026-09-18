@@ -10,24 +10,26 @@ import org.json.JSONObject
 
 internal class ApiException(val statusCode: Int, val code: String? = null, message: String) : IOException(message)
 internal data class RegisterInstallationRequest(val username: String, val platform: String, val fcmToken: String)
-internal data class SendTouchRequest(val clientMessageId: String, val recipientUsername: String, val samplePeriodMs: Int, val amplitudes: List<Int>)
+internal data class SendTouchRequest(val clientMessageId: String, val recipientUsername: String, val samplePeriodMs: Int, val amplitudes: List<Int>, val audio: AudioAttachment?)
 internal data class TouchAccepted(val touchId: String, val clientMessageId: String, val acceptedAtMs: Long, val duplicate: Boolean)
-internal data class RemoteTouch(val touchId: String, val clientMessageId: String, val senderUsername: String, val samplePeriodMs: Int, val amplitudes: List<Int>, val createdAtMs: Long)
+internal data class RemoteTouch(val touchId: String, val clientMessageId: String, val senderUsername: String, val samplePeriodMs: Int, val amplitudes: List<Int>, val createdAtMs: Long, val audio: AudioAttachment?)
 internal interface TouchApi { suspend fun register(settings: CommunicationSettings, platform: String); suspend fun send(settings: CommunicationSettings, item: OutboxTouchEntity): TouchAccepted; suspend fun pending(settings: CommunicationSettings): List<RemoteTouch>; suspend fun ack(settings: CommunicationSettings, touchId: String, state: String) }
 
 /** The only org.json boundary; all callers use typed DTOs. */
 internal object ApiJson {
     fun register(v: RegisterInstallationRequest) = JSONObject().put("username", v.username).put("platform", v.platform).put("fcmToken", v.fcmToken)
-    fun send(v: SendTouchRequest) = JSONObject().put("clientMessageId", v.clientMessageId).put("recipientUsername", v.recipientUsername).put("samplePeriodMs", v.samplePeriodMs).put("amplitudes", JSONArray(v.amplitudes))
+    fun send(v: SendTouchRequest) = JSONObject().put("clientMessageId", v.clientMessageId).put("recipientUsername", v.recipientUsername).put("samplePeriodMs", v.samplePeriodMs).put("amplitudes", JSONArray(v.amplitudes)).also { root -> v.audio?.let { audio -> root.put("audio", audioJson(audio)) } }
     fun ack(state: String) = JSONObject().put("state", state)
     fun accepted(j: JSONObject) = TouchAccepted(j.getString("touchId"), j.getString("clientMessageId"), j.getLong("acceptedAtMs"), j.getBoolean("duplicate"))
-    fun pending(j: JSONObject): List<RemoteTouch> = j.getJSONArray("touches").let { values -> List(values.length()) { i -> values.getJSONObject(i).let { item -> RemoteTouch(item.getString("touchId"), item.getString("clientMessageId"), item.getString("senderUsername"), item.getInt("samplePeriodMs"), item.getJSONArray("amplitudes").let { a -> List(a.length()) { a.getInt(it) } }, item.getLong("createdAtMs")) } } }
+    fun pending(j: JSONObject): List<RemoteTouch> = j.getJSONArray("touches").let { values -> List(values.length()) { i -> values.getJSONObject(i).let { item -> RemoteTouch(item.getString("touchId"), item.getString("clientMessageId"), item.getString("senderUsername"), item.getInt("samplePeriodMs"), item.getJSONArray("amplitudes").let { a -> List(a.length()) { a.getInt(it) } }, item.getLong("createdAtMs"), item.optJSONObject("audio")?.let(::audioFromJson)) } } }
+    private fun audioJson(audio: AudioAttachment) = JSONObject().put("codec", audio.codec).put("sampleRateHz", audio.sampleRateHz).put("channelCount", audio.channelCount).put("durationMs", audio.durationMs).put("data", android.util.Base64.encodeToString(audio.data, android.util.Base64.NO_WRAP))
+    private fun audioFromJson(json: JSONObject) = AudioAttachment(json.getString("codec"), json.getInt("sampleRateHz"), json.getInt("channelCount"), json.getInt("durationMs"), android.util.Base64.decode(json.getString("data"), android.util.Base64.DEFAULT))
     fun error(text: String): Pair<String?, String?> = runCatching { JSONObject(text).getJSONObject("error").let { it.optString("code", null) to it.optString("message", null) } }.getOrDefault(null to null)
 }
 
 internal class TouchApiClient : TouchApi {
     override suspend fun register(s: CommunicationSettings, platform: String) { request(s, "PUT", "/v1/installations/${s.installationId}", ApiJson.register(RegisterInstallationRequest(s.username, platform, s.fcmToken))) }
-    override suspend fun send(s: CommunicationSettings, item: OutboxTouchEntity): TouchAccepted = ApiJson.accepted(request(s, "POST", "/v1/touches", ApiJson.send(SendTouchRequest(item.clientMessageId, item.recipientUsername, item.samplePeriodMillis, item.amplitudes.map { it.toInt() and 255 }))))
+    override suspend fun send(s: CommunicationSettings, item: OutboxTouchEntity): TouchAccepted = ApiJson.accepted(request(s, "POST", "/v1/touches", ApiJson.send(SendTouchRequest(item.clientMessageId, item.recipientUsername, item.samplePeriodMillis, item.amplitudes.map { it.toInt() and 255 }, audioAttachment(item.audioCodec, item.audioSampleRateHz, item.audioChannelCount, item.audioDurationMs, item.audioData)))))
     override suspend fun pending(s: CommunicationSettings): List<RemoteTouch> = ApiJson.pending(request(s, "GET", "/v1/touches?state=pending", null))
     override suspend fun ack(s: CommunicationSettings, touchId: String, state: String) { request(s, "POST", "/v1/touches/$touchId/ack", ApiJson.ack(state), false) }
     private suspend fun request(s: CommunicationSettings, method: String, path: String, body: JSONObject?, expectBody: Boolean = true): JSONObject = withContext(Dispatchers.IO) {

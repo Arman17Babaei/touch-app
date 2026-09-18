@@ -42,6 +42,7 @@ type TouchMessage struct {
 	ExpiresAt          int64
 	ReceivedAt         *int64
 	PlayedAt           *int64
+	Audio              *audioPayload
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -93,7 +94,44 @@ CREATE INDEX IF NOT EXISTS idx_touches_recipient_pending
     ON touches(recipient_installation_id, received_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_touches_expires_at ON touches(expires_at);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Existing installations may already have the v1 table. Keep the migration
+	// additive so audio-capable servers can read their old durable messages.
+	for _, column := range []struct{ name, definition string }{
+		{"audio_codec", "TEXT NOT NULL DEFAULT ''"}, {"audio_sample_rate_hz", "INTEGER NOT NULL DEFAULT 0"},
+		{"audio_channel_count", "INTEGER NOT NULL DEFAULT 0"}, {"audio_duration_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"audio_data", "BLOB"},
+	} {
+		var found int
+		rows, queryErr := s.db.Query(`PRAGMA table_info(touches)`)
+		if queryErr != nil {
+			return queryErr
+		}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull, pk int
+			var defaultValue any
+			if scanErr := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); scanErr != nil {
+				rows.Close()
+				return scanErr
+			}
+			if name == column.name {
+				found = 1
+			}
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return closeErr
+		}
+		if found == 0 {
+			if _, alterErr := s.db.Exec("ALTER TABLE touches ADD COLUMN " + column.name + " " + column.definition); alterErr != nil {
+				return alterErr
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) Register(ctx context.Context, in Installation, now time.Time) (Installation, error) {
@@ -163,18 +201,22 @@ func (s *Store) CreateTouch(ctx context.Context, senderID string, in TouchMessag
 
 	var existing TouchMessage
 	var payload []byte
+	var audioCodec string
+	var audioRate, audioChannels, audioDuration int
+	var audioData []byte
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, sender_handle, recipient_handle, sample_period_ms, amplitudes, created_at, expires_at, received_at, played_at
+		`SELECT id, sender_handle, recipient_handle, sample_period_ms, amplitudes, created_at, expires_at, received_at, played_at, audio_codec, audio_sample_rate_hz, audio_channel_count, audio_duration_ms, audio_data
 FROM touches WHERE sender_installation_id = ? AND client_message_id = ?`, senderID, in.ClientMessageID,
 	).Scan(&existing.ID, &existing.SenderHandle, &existing.RecipientHandle, &existing.SamplePeriodMillis, &payload,
-		&existing.CreatedAt, &existing.ExpiresAt, &existing.ReceivedAt, &existing.PlayedAt)
+		&existing.CreatedAt, &existing.ExpiresAt, &existing.ReceivedAt, &existing.PlayedAt, &audioCodec, &audioRate, &audioChannels, &audioDuration, &audioData)
 	if err == nil {
 		existing.ClientMessageID = in.ClientMessageID
 		existing.Amplitudes = make([]int, len(payload))
 		for i, value := range payload {
 			existing.Amplitudes[i] = int(value)
 		}
-		if existing.RecipientHandle != recipientHandle || existing.SamplePeriodMillis != in.SamplePeriodMillis || !sameAmplitudes(existing.Amplitudes, in.Amplitudes) {
+		existing.Audio = audioFromColumns(audioCodec, audioRate, audioChannels, audioDuration, audioData)
+		if existing.RecipientHandle != recipientHandle || existing.SamplePeriodMillis != in.SamplePeriodMillis || !sameAmplitudes(existing.Amplitudes, in.Amplitudes) || !sameAudio(existing.Audio, in.Audio) {
 			return TouchMessage{}, "", false, errIdempotencyConflict
 		}
 		return existing, fcmToken, false, tx.Commit()
@@ -195,10 +237,11 @@ FROM touches WHERE sender_installation_id = ? AND client_message_id = ?`, sender
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO touches(
     id, client_message_id, sender_installation_id, recipient_installation_id,
-    sender_handle, recipient_handle, sample_period_ms, amplitudes, created_at, expires_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sender_handle, recipient_handle, sample_period_ms, amplitudes, created_at, expires_at,
+    audio_codec, audio_sample_rate_hz, audio_channel_count, audio_duration_ms, audio_data
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.ClientMessageID, senderID, recipientID, senderHandle, recipientHandle,
-		in.SamplePeriodMillis, payload, in.CreatedAt, in.ExpiresAt)
+		in.SamplePeriodMillis, payload, in.CreatedAt, in.ExpiresAt, audioCodecOf(in.Audio), audioRateOf(in.Audio), audioChannelsOf(in.Audio), audioDurationOf(in.Audio), audioDataOf(in.Audio))
 	if err != nil {
 		return TouchMessage{}, "", false, err
 	}
@@ -214,7 +257,7 @@ func (s *Store) PendingTouches(ctx context.Context, recipientID string, now time
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, client_message_id, sender_handle, recipient_handle, sample_period_ms,
-       amplitudes, created_at, expires_at, received_at, played_at
+       amplitudes, created_at, expires_at, received_at, played_at, audio_codec, audio_sample_rate_hz, audio_channel_count, audio_duration_ms, audio_data
 FROM touches
 WHERE recipient_installation_id = ? AND received_at IS NULL AND expires_at > ?
 ORDER BY created_at ASC, id ASC
@@ -228,9 +271,12 @@ LIMIT ?`, recipientID, now.UnixMilli(), limit)
 		var item TouchMessage
 		var payload []byte
 		var receivedAt, playedAt sql.NullInt64
+		var audioCodec string
+		var audioRate, audioChannels, audioDuration int
+		var audioData []byte
 		if err := rows.Scan(
 			&item.ID, &item.ClientMessageID, &item.SenderHandle, &item.RecipientHandle,
-			&item.SamplePeriodMillis, &payload, &item.CreatedAt, &item.ExpiresAt, &receivedAt, &playedAt,
+			&item.SamplePeriodMillis, &payload, &item.CreatedAt, &item.ExpiresAt, &receivedAt, &playedAt, &audioCodec, &audioRate, &audioChannels, &audioDuration, &audioData,
 		); err != nil {
 			return nil, err
 		}
@@ -246,9 +292,53 @@ LIMIT ?`, recipientID, now.UnixMilli(), limit)
 			value := playedAt.Int64
 			item.PlayedAt = &value
 		}
+		item.Audio = audioFromColumns(audioCodec, audioRate, audioChannels, audioDuration, audioData)
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func audioFromColumns(codec string, rate, channels, duration int, data []byte) *audioPayload {
+	if len(data) == 0 {
+		return nil
+	}
+	return &audioPayload{Codec: codec, SampleRateHz: rate, ChannelCount: channels, DurationMs: duration, Data: data}
+}
+func audioCodecOf(v *audioPayload) string {
+	if v == nil {
+		return ""
+	}
+	return v.Codec
+}
+func audioRateOf(v *audioPayload) int {
+	if v == nil {
+		return 0
+	}
+	return v.SampleRateHz
+}
+func audioChannelsOf(v *audioPayload) int {
+	if v == nil {
+		return 0
+	}
+	return v.ChannelCount
+}
+func audioDurationOf(v *audioPayload) int {
+	if v == nil {
+		return 0
+	}
+	return v.DurationMs
+}
+func audioDataOf(v *audioPayload) []byte {
+	if v == nil {
+		return nil
+	}
+	return v.Data
+}
+func sameAudio(left, right *audioPayload) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Codec == right.Codec && left.SampleRateHz == right.SampleRateHz && left.ChannelCount == right.ChannelCount && left.DurationMs == right.DurationMs && string(left.Data) == string(right.Data)
 }
 
 func (s *Store) AckTouch(ctx context.Context, recipientID, touchID, status string, now time.Time) error {
