@@ -1,0 +1,17 @@
+services:
+  touch-backend:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      TOUCH_LISTEN_ADDR: ":8080"
+      TOUCH_SQLITE_PATH: "/data/touch.db"
+      TOUCH_FIREBASE_PROJECT_ID: "${TOUCH_FIREBASE_PROJECT_ID:-}"
+      GOOGLE_APPLICATION_CREDENTIALS: "${GOOGLE_APPLICATION_CREDENTIALS:-}"
+    volumes:
+      - touch-data:/data
+      - ./secrets:/secrets:ro
+    restart: unless-stopped
+
+volumes:
+  touch-data:

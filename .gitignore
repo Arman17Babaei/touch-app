@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+.idea/
+local.properties
+.android-sdk/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+**/build/
+backend/touch.db*
+backend/secrets/
+**/google-services.json
+firebase-service-account*.json

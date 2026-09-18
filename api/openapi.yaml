@@ -1,0 +1,225 @@
+openapi: 3.1.0
+info:
+  title: Touch API
+  version: 1.0.0
+  description: Standalone phone and watch touch delivery API.
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200':
+          description: Service is healthy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /v1/installations/{installationId}:
+    put:
+      operationId: registerInstallation
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+        - $ref: '#/components/parameters/InstallationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/InstallationRequest' } }
+      responses:
+        '200': { description: Installation registered, content: { application/json: { schema: { $ref: '#/components/schemas/Installation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/touches:
+    post:
+      operationId: sendTouch
+      parameters: [ { $ref: '#/components/parameters/InstallationHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/TouchSendRequest' } }
+      responses:
+        '202': { description: Touch durably accepted, content: { application/json: { schema: { $ref: '#/components/schemas/TouchAccepted' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      operationId: listPendingTouches
+      parameters:
+        - $ref: '#/components/parameters/InstallationHeader'
+        - name: state
+          in: query
+          required: true
+          schema: { type: string, const: pending }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200': { description: FIFO pending inbox, content: { application/json: { schema: { $ref: '#/components/schemas/PendingTouches' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/touches/{touchId}/ack:
+    post:
+      operationId: acknowledgeTouch
+      parameters:
+        - $ref: '#/components/parameters/TouchId'
+        - $ref: '#/components/parameters/InstallationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AckRequest' } }
+      responses:
+        '204': { description: Acknowledgement recorded. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/live:
+    get:
+      operationId: connectLiveTouch
+      summary: Foreground-only full-duplex live-touch WebSocket relay.
+      description: "Upgrade this authenticated request to WebSocket. Events are ephemeral and are neither persisted nor retried. A client sends LiveStart, LiveSamples, and LiveEnd messages. The server relays them to the named peer and may return LivePeerUnavailable or LiveError. Both peers may have an active outgoing stream simultaneously."
+      parameters: [ { $ref: '#/components/parameters/InstallationHeader' } ]
+      x-websocket-client-messages:
+        - { $ref: '#/components/schemas/LiveStart' }
+        - { $ref: '#/components/schemas/LiveSamples' }
+        - { $ref: '#/components/schemas/LiveEnd' }
+      x-websocket-server-messages:
+        - { $ref: '#/components/schemas/LiveStart' }
+        - { $ref: '#/components/schemas/LiveSamples' }
+        - { $ref: '#/components/schemas/LiveEnd' }
+        - { $ref: '#/components/schemas/LivePeerUnavailable' }
+        - { $ref: '#/components/schemas/LiveError' }
+      responses:
+        '101': { description: WebSocket upgrade accepted. }
+        '401': { $ref: '#/components/responses/Error' }
+components:
+  parameters:
+    InstallationId:
+      name: installationId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Uuid' }
+    TouchId:
+      name: touchId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Uuid' }
+    InstallationHeader:
+      name: X-Installation-ID
+      in: header
+      required: true
+      schema: { $ref: '#/components/schemas/Uuid' }
+  responses:
+    Error:
+      description: Stable API error.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } }
+  schemas:
+    Uuid: { type: string, format: uuid }
+    Username: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$' }
+    Health:
+      type: object
+      required: [status]
+      properties: { status: { type: string, const: ok } }
+    InstallationRequest:
+      type: object
+      additionalProperties: false
+      required: [username, platform]
+      properties:
+        username: { $ref: '#/components/schemas/Username' }
+        platform: { type: string, enum: [phone, watch] }
+        fcmToken: { type: string }
+    Installation:
+      type: object
+      required: [installationId, username, platform, updatedAtMs]
+      properties:
+        installationId: { $ref: '#/components/schemas/Uuid' }
+        username: { $ref: '#/components/schemas/Username' }
+        platform: { type: string, enum: [phone, watch] }
+        updatedAtMs: { type: integer, format: int64 }
+    TouchSendRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, recipientUsername, samplePeriodMs, amplitudes]
+      properties:
+        clientMessageId: { $ref: '#/components/schemas/Uuid' }
+        recipientUsername: { $ref: '#/components/schemas/Username' }
+        samplePeriodMs: { type: integer, minimum: 1, maximum: 100 }
+        amplitudes: { type: array, minItems: 1, maxItems: 3000, items: { type: integer, minimum: 0, maximum: 255 } }
+    TouchAccepted:
+      type: object
+      required: [touchId, clientMessageId, acceptedAtMs, duplicate]
+      properties:
+        touchId: { $ref: '#/components/schemas/Uuid' }
+        clientMessageId: { $ref: '#/components/schemas/Uuid' }
+        acceptedAtMs: { type: integer, format: int64 }
+        duplicate: { type: boolean }
+    PendingTouch:
+      type: object
+      required: [touchId, clientMessageId, senderUsername, samplePeriodMs, amplitudes, createdAtMs, expiresAtMs]
+      properties:
+        touchId: { $ref: '#/components/schemas/Uuid' }
+        clientMessageId: { $ref: '#/components/schemas/Uuid' }
+        senderUsername: { $ref: '#/components/schemas/Username' }
+        samplePeriodMs: { type: integer }
+        amplitudes: { type: array, items: { type: integer } }
+        createdAtMs: { type: integer, format: int64 }
+        expiresAtMs: { type: integer, format: int64 }
+    PendingTouches:
+      type: object
+      required: [touches]
+      properties: { touches: { type: array, items: { $ref: '#/components/schemas/PendingTouch' } } }
+    AckRequest:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties: { state: { type: string, enum: [persisted, played] } }
+    LiveStart:
+      type: object
+      additionalProperties: false
+      required: [type, streamId, recipientUsername, samplePeriodMs]
+      properties:
+        type: { type: string, const: start }
+        streamId: { type: string, format: uuid }
+        recipientUsername: { $ref: '#/components/schemas/Username' }
+        samplePeriodMs: { type: integer, minimum: 1, maximum: 100 }
+    LiveSamples:
+      type: object
+      additionalProperties: false
+      required: [type, streamId, startIndex, amplitudes]
+      properties:
+        type: { type: string, const: samples }
+        streamId: { type: string, format: uuid }
+        startIndex: { type: integer, minimum: 0, description: Zero-based sample index; required for the first batch even when zero. }
+        amplitudes: { type: array, minItems: 1, maxItems: 100, items: { type: integer, minimum: 0, maximum: 255 } }
+    LiveEnd:
+      type: object
+      additionalProperties: false
+      required: [type, streamId]
+      properties:
+        type: { type: string, const: end }
+        streamId: { type: string, format: uuid }
+    LivePeerUnavailable:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties: { type: { type: string, const: peerUnavailable } }
+    LiveError:
+      type: object
+      additionalProperties: false
+      required: [type, code]
+      properties:
+        type: { type: string, const: error }
+        code: { type: string, enum: [INVALID_EVENT, INVALID_START, NO_ACTIVE_STREAM, INVALID_SAMPLES] }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
