@@ -12,3 +12,6 @@ backend/touch.db*
 backend/secrets/
 **/google-services.json
 firebase-service-account*.json
+*.jks
+*.keystore
+*.p12
