@@ -9,8 +9,11 @@ Wear Data Layer.
 - `core`: touch model, 10 ms recorder, optimizer, and Android vibrator adapter
 - `communication`: installation/settings storage, Room inbox/outbox, HTTP client,
   WorkManager delivery, FCM handling, notifications, and playback coordination
-- `mobile`: phone UI (`app.touch.mobile`)
-- `wear`: standalone Wear OS UI (`app.touch.wear`)
+- `mobile`: phone UI (code namespace `app.touch.mobile`)
+- `wear`: standalone Wear OS UI (code namespace `app.touch.wear`)
+
+Both applications use the install/package ID `ir.armanbabaei.touch` so Google
+Play can distribute them from one listing on its mobile and Wear OS tracks.
 - `backend`: Go HTTP service, SQLite store, and Firebase Admin sender
 
 ## Backend
@@ -57,15 +60,15 @@ The container supports these variables:
 
 ## Firebase client configuration
 
-Register Android apps `app.touch.mobile` and `app.touch.wear` in the same Firebase
-project. Put these values in the untracked root `local.properties` file:
+Register one Android app, `ir.armanbabaei.touch`, in Firebase. Both the mobile
+and standalone Wear OS builds use this shared Play/Firebase identity. Put these
+values in the untracked root `local.properties` file:
 
 ```properties
 TOUCH_FIREBASE_PROJECT_ID=your-firebase-project
 TOUCH_FIREBASE_SENDER_ID=1234567890
 TOUCH_FIREBASE_API_KEY=your-client-api-key
-TOUCH_MOBILE_FIREBASE_APP_ID=1:1234567890:android:mobile-app-id
-TOUCH_WEAR_FIREBASE_APP_ID=1:1234567890:android:wear-app-id
+TOUCH_FIREBASE_APP_ID=1:1234567890:android:shared-app-id
 ```
 
 These are Firebase client identifiers, not the backend service-account secret.
@@ -92,10 +95,11 @@ HTTPS unless their network policy is changed deliberately.
 
 ## GitHub releases
 
-Publishing a GitHub Release builds, signs, and attaches one APK for `mobile` and
-one for `wear`, plus a `SHA256SUMS.txt` file. The release tag becomes the Android
-`versionName` (a leading `v` is removed), and the workflow run number becomes
-the monotonically increasing `versionCode`.
+Publishing a GitHub Release builds, signs, and attaches APK and Android App
+Bundle (`.aab`) files for `mobile` and `wear`, plus a `SHA256SUMS.txt` file. The
+release tag becomes the Android `versionName` (a leading `v` is removed). Mobile
+uses `workflow run number * 10 + 1` as its `versionCode`; Wear uses `workflow run
+number * 10 + 2`, keeping both codes unique under their shared Play listing.
 
 Create a release keystore once and keep it backed up securely. Losing it means
 future versions cannot update installations signed with that key. Add these
@@ -107,7 +111,7 @@ repository Actions secrets under **Settings > Secrets and variables > Actions**:
 - `ANDROID_KEY_ALIAS`: the key alias
 - `ANDROID_KEY_PASSWORD`: the key password
 
-Also add the five Firebase client values from the earlier configuration section
+Also add the four Firebase client values from the earlier configuration section
 as Actions **variables**, using the same names. The signing material is written
 only to the temporary GitHub runner and is never committed or uploaded. The
 workflow fails instead of publishing unsigned APKs when signing secrets are
