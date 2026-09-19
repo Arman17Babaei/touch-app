@@ -7,8 +7,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CommunicationPolicyTest {
+    @Test fun liveErrorsHaveReadableReasonAndCode() {
+        assertEquals("Recipient is unavailable (RECIPIENT_UNAVAILABLE)", liveErrorMessage("RECIPIENT_UNAVAILABLE"))
+        assertEquals("Live call failed (SOMETHING_NEW)", liveErrorMessage("SOMETHING_NEW"))
+    }
     @Test
-    fun configuredRequiresAllAddressingFields() {
+    fun configuredAllowsContactSelectionAfterRegistration() {
         assertTrue(
             CommunicationSettings(
                 installationId = "id",
@@ -17,6 +21,7 @@ class CommunicationPolicyTest {
                 peerUsername = "watch",
             ).isConfigured,
         )
+        assertTrue(CommunicationSettings(installationId = "id", backendUrl = "http://server:8080", username = "phone").isConfigured)
         assertFalse(CommunicationSettings(installationId = "id").isConfigured)
     }
 

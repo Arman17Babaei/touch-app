@@ -27,7 +27,7 @@ type Server struct {
 
 func NewServer(store *Store, notifier Notifier) *Server {
 	s := &Server{store: store, notifier: notifier, now: time.Now}
-	s.hub = NewLiveHub(notifier, func() time.Time { return s.now() })
+	s.hub = NewLiveHub(store, notifier, func() time.Time { return s.now() })
 	return s
 }
 
@@ -35,6 +35,21 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("PUT /v1/installations/{id}", s.registerInstallation)
+	mux.HandleFunc("GET /v1/installations/{id}", s.installationStatus)
+	mux.HandleFunc("POST /v1/installations/{id}/push-tests", s.startPushTest)
+	mux.HandleFunc("GET /v1/push-tests/{id}", s.pushTestStatus)
+	mux.HandleFunc("POST /v1/push-tests/{id}/ack", s.ackPushTest)
+	mux.HandleFunc("GET /v1/contacts", s.listContacts)
+	mux.HandleFunc("POST /v1/contacts", s.addContact)
+	mux.HandleFunc("DELETE /v1/contacts/{username}", s.removeContact)
+	mux.HandleFunc("POST /v1/diagnostics/events", s.acceptDiagnostics)
+	mux.HandleFunc("POST /v1/notifications/{id}/events", s.notificationEvent)
+	mux.HandleFunc("GET /v1/touches/{id}/status", s.touchStatus)
+	mux.HandleFunc("GET /v1/admin/diagnostics", s.adminDiagnostics)
+	mux.HandleFunc("GET /v1/admin/calls", s.adminCalls)
+	mux.HandleFunc("GET /v1/admin/calls/{id}", s.adminCall)
+	mux.HandleFunc("GET /v1/admin/notifications", s.adminNotifications)
+	mux.HandleFunc("GET /v1/admin/notifications/{id}", s.adminNotification)
 	mux.HandleFunc("POST /v1/touches", s.sendTouch)
 	mux.HandleFunc("GET /v1/touches", s.pendingTouches)
 	mux.HandleFunc("POST /v1/touches/{id}/ack", s.ackTouch)
@@ -130,9 +145,15 @@ func (s *Server) sendTouch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isNew {
-		if err := s.notifier.NotifyTouch(r.Context(), token, created.ID); err != nil {
-			logAt(errorLevel, "notify touch failed touch_id=%s error=%v", created.ID, err)
+		recipient, _ := s.store.InstallationByUsername(r.Context(), created.RecipientHandle)
+		deliveryID := s.store.createNotification("touch", created.ID, senderID, recipient.ID, s.now().UnixMilli())
+		messageID, notifyErr := s.notifier.NotifyTouch(r.Context(), token, created.ID, deliveryID)
+		s.store.finishNotification(deliveryID, messageID, notifyErr)
+		if notifyErr != nil {
+			logAt(errorLevel, "notify touch failed touch_id=%s error=%v", created.ID, notifyErr)
 		}
+		s.store.markRecent(senderID, created.RecipientHandle, s.now().UnixMilli())
+		s.store.markRecent(recipient.ID, created.SenderHandle, s.now().UnixMilli())
 	}
 	writeJSON(w, http.StatusAccepted, touchAcceptedResponse{
 		TouchID: created.ID, ClientMessageID: created.ClientMessageID,

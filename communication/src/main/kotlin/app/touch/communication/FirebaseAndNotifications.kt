@@ -25,15 +25,21 @@ class TouchFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        val deliveryId=message.data["deliveryId"]
+        deliveryId?.let { id -> scope.launch { val c=TouchCommunication.get(applicationContext);runCatching{c.api.notificationEvent(c.settingsStore.current(),id,"received")} } }
         when (message.data["type"]) {
-            "touch_available" -> CommunicationWork.enqueueSync(applicationContext)
+            "touch_available" -> CommunicationWork.enqueueSync(applicationContext,deliveryId)
             "live_invite" -> {
                 val callId = message.data["callId"] ?: return
                 val caller = message.data["callerUsername"] ?: return
-                TouchNotifications.showLiveInvite(applicationContext, callId, caller)
+                LiveCallService.startIncoming(applicationContext,callId,caller,deliveryId)
+                deliveryId?.let{id->scope.launch{val c=TouchCommunication.get(applicationContext);runCatching{c.api.notificationEvent(c.settingsStore.current(),id,"notification_presented")}}}
             }
+            "push_test" -> message.data["testId"]?.let { id -> scope.launch { val c=TouchCommunication.get(applicationContext);runCatching{c.api.ackPushTest(c.settingsStore.current(),id)} } }
         }
     }
+
+    override fun onDeletedMessages() { val c=TouchCommunication.get(applicationContext);c.recordDiagnostic("warn","notification","fcm_messages_deleted");CommunicationWork.enqueueSync(applicationContext) }
 }
 
 data class LiveInvite(val callId: String, val callerUsername: String)

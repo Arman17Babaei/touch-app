@@ -29,21 +29,28 @@ type fakeNotifier struct {
 	err         error
 }
 
-func (n *fakeNotifier) NotifyTouch(_ context.Context, token, touchID string) error {
+func (n *fakeNotifier) NotifyTouch(_ context.Context, token, touchID, _ string) (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.tokens = append(n.tokens, token)
 	n.touchIDs = append(n.touchIDs, touchID)
-	return n.err
+	return "fake-touch-message", n.err
 }
 
-func (n *fakeNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername string) error {
+func (n *fakeNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername, _ string) (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.tokens = append(n.tokens, token)
 	n.liveCallIDs = append(n.liveCallIDs, callID)
 	n.liveCallers = append(n.liveCallers, callerUsername)
-	return n.err
+	return "fake-live-message", n.err
+}
+
+func (n *fakeNotifier) NotifyPushTest(_ context.Context, token, testID string) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.tokens = append(n.tokens, token)
+	return "fake-push-message", n.err
 }
 
 func (n *fakeNotifier) snapshot() (tokens, touchIDs, liveCallIDs, liveCallers []string) {

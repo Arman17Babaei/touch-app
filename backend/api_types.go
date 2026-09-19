@@ -13,6 +13,63 @@ type installationResponse struct {
 	UpdatedAtMs    int64  `json:"updatedAtMs"`
 }
 
+type installationStatusResponse struct {
+	InstallationID      string `json:"installationId"`
+	Username            string `json:"username"`
+	Platform            string `json:"platform"`
+	UpdatedAtMs         int64  `json:"updatedAtMs"`
+	FCMTokenPresent     bool   `json:"fcmTokenPresent"`
+	FCMTokenFingerprint string `json:"fcmTokenFingerprint,omitempty"`
+	LastPushTestStatus  string `json:"lastPushTestStatus,omitempty"`
+}
+
+type contactRequest struct {
+	Username string `json:"username"`
+}
+type contactResponse struct {
+	Username     string `json:"username"`
+	Saved        bool   `json:"saved"`
+	LastUsedAtMs *int64 `json:"lastUsedAtMs,omitempty"`
+}
+type contactsResponse struct {
+	Contacts []contactResponse `json:"contacts"`
+}
+
+type diagnosticEventRequest struct {
+	EventID         string         `json:"eventId"`
+	OccurredAtMs    int64          `json:"occurredAtMs"`
+	Severity        string         `json:"severity"`
+	Category        string         `json:"category"`
+	Name            string         `json:"name"`
+	CallID          string         `json:"callId,omitempty"`
+	TouchID         string         `json:"touchId,omitempty"`
+	ClientMessageID string         `json:"clientMessageId,omitempty"`
+	Message         string         `json:"message,omitempty"`
+	Attributes      map[string]any `json:"attributes,omitempty"`
+}
+type diagnosticBatchRequest struct {
+	Events []diagnosticEventRequest `json:"events"`
+}
+type notificationEventRequest struct {
+	Event        string `json:"event"`
+	OccurredAtMs int64  `json:"occurredAtMs"`
+}
+
+type pushTestResponse struct {
+	TestID        string `json:"testId"`
+	Status        string `json:"status"`
+	CreatedAtMs   int64  `json:"createdAtMs"`
+	CompletedAtMs *int64 `json:"completedAtMs,omitempty"`
+}
+type messageStatusResponse struct {
+	TouchID                  string `json:"touchId"`
+	AcceptedAtMs             int64  `json:"acceptedAtMs"`
+	NotificationStatus       string `json:"notificationStatus"`
+	NotificationReceivedAtMs *int64 `json:"notificationReceivedAtMs,omitempty"`
+	PersistedAtMs            *int64 `json:"persistedAtMs,omitempty"`
+	PlayedAtMs               *int64 `json:"playedAtMs,omitempty"`
+}
+
 type touchSendRequest struct {
 	ClientMessageID   string        `json:"clientMessageId"`
 	RecipientUsername string        `json:"recipientUsername"`

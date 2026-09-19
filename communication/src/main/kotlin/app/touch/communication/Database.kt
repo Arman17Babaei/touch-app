@@ -49,6 +49,20 @@ internal data class OutboxTouchEntity(
     val audioData: ByteArray? = null,
 )
 
+@Entity(tableName = "diagnostic_events")
+internal data class DiagnosticEventEntity(
+    @PrimaryKey val eventId: String,
+    val occurredAtMs: Long,
+    val severity: String,
+    val category: String,
+    val name: String,
+    val callId: String? = null,
+    val touchId: String? = null,
+    val clientMessageId: String? = null,
+    val message: String = "",
+    val attributesJson: String = "{}",
+)
+
 @Dao
 internal interface TouchDao {
     @Query("SELECT * FROM inbox_touches ORDER BY createdAt DESC LIMIT 100")
@@ -92,11 +106,20 @@ internal interface TouchDao {
 
     @Query("DELETE FROM outbox_touches WHERE status = 'SENT' AND clientMessageId NOT IN (SELECT clientMessageId FROM outbox_touches ORDER BY createdAt DESC LIMIT 100)")
     suspend fun trimOutbox()
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertDiagnostic(item: DiagnosticEventEntity)
+    @Query("SELECT * FROM diagnostic_events ORDER BY occurredAtMs ASC LIMIT :limit")
+    suspend fun pendingDiagnostics(limit: Int = 100): List<DiagnosticEventEntity>
+    @Query("DELETE FROM diagnostic_events WHERE eventId IN (:ids)")
+    suspend fun deleteDiagnostics(ids: List<String>)
+    @Query("DELETE FROM diagnostic_events WHERE eventId NOT IN (SELECT eventId FROM diagnostic_events ORDER BY occurredAtMs DESC LIMIT 500)")
+    suspend fun trimDiagnostics()
 }
 
 @Database(
-    entities = [InboxTouchEntity::class, OutboxTouchEntity::class],
-    version = 3,
+    entities = [InboxTouchEntity::class, OutboxTouchEntity::class, DiagnosticEventEntity::class],
+    version = 4,
     exportSchema = true,
 )
 internal abstract class TouchDatabase : RoomDatabase() {
@@ -110,7 +133,7 @@ internal abstract class TouchDatabase : RoomDatabase() {
                 context.applicationContext,
                 TouchDatabase::class.java,
                 "touch-communication.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
         private val MIGRATION_1_2 = object : Migration(1, 2) { override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE inbox_touches ADD COLUMN clientMessageId TEXT NOT NULL DEFAULT ''"); db.execSQL("ALTER TABLE outbox_touches ADD COLUMN serverTouchId TEXT") } }
         private val MIGRATION_2_3 = object : Migration(2, 3) { override fun migrate(db: SupportSQLiteDatabase) {
@@ -125,6 +148,9 @@ internal abstract class TouchDatabase : RoomDatabase() {
             db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioChannelCount INTEGER")
             db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioDurationMs INTEGER")
             db.execSQL("ALTER TABLE outbox_touches ADD COLUMN audioData BLOB")
+        } }
+        private val MIGRATION_3_4 = object : Migration(3, 4) { override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("CREATE TABLE IF NOT EXISTS diagnostic_events (`eventId` TEXT NOT NULL, `occurredAtMs` INTEGER NOT NULL, `severity` TEXT NOT NULL, `category` TEXT NOT NULL, `name` TEXT NOT NULL, `callId` TEXT, `touchId` TEXT, `clientMessageId` TEXT, `message` TEXT NOT NULL, `attributesJson` TEXT NOT NULL, PRIMARY KEY(`eventId`))")
         } }
     }
 }

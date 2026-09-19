@@ -11,8 +11,16 @@ data class CommunicationSettings(
 ) {
     val isConfigured: Boolean
         get() = installationId.isNotBlank() && backendUrl.isNotBlank() &&
-            username.isNotBlank() && peerUsername.isNotBlank()
+            username.isNotBlank()
 }
+
+data class Contact(val username: String, val saved: Boolean, val lastUsedAtMs: Long? = null)
+data class InstallationStatus(
+    val installationId: String, val username: String, val platform: String,
+    val updatedAtMs: Long, val fcmTokenPresent: Boolean,
+    val fcmTokenFingerprint: String?, val lastPushTestStatus: String?,
+)
+data class PushTest(val testId: String, val status: String, val createdAtMs: Long, val completedAtMs: Long? = null)
 
 enum class OutboxStatus { QUEUED, SENDING, SENT, FAILED }
 

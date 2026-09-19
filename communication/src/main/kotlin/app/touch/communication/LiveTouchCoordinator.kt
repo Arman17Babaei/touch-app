@@ -30,6 +30,8 @@ data class LiveState(
     val peerUsername: String = "",
     val reason: String? = null,
     val connectedAtMs: Long? = null,
+    val generation: Int = 0,
+    val notificationStatus: String = "",
 )
 
 data class LiveDiagnostics(
@@ -37,6 +39,9 @@ data class LiveDiagnostics(
     val underruns: Long = 0,
     val outOfOrderBatches: Long = 0,
     val playbackRestarts: Long = 0,
+    val sentBatches: Long = 0,
+    val receivedBatches: Long = 0,
+    val reconnectAttempts: Long = 0,
 )
 
 /** Foreground-only call transport. Live samples are never persisted in the durable inbox. */
@@ -68,6 +73,11 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
     private var reconnectDeadlineMs = 0L
     private var reconnectJob: Job? = null
     private var samplerJob: Job? = null
+    private var healthJob:Job?=null
+    private var hangupJob:Job?=null
+    private var generation=0
+    private var sentBatches=0L
+    private var reconnectAttempts=0L
     private var peerUsername = ""
     private var callId: String? = null
     private var streamId: String? = null
@@ -127,9 +137,12 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         // OkHttp drops frames queued immediately before close on some devices. Give the
         // control frame a short turn on the writer before closing the socket locally.
         scope.launch {
+            // Stop producers first so no media frames can be queued behind hangup and
+            // rejected after the server has removed the call.
+            stopStreaming()
             val sent = socketOpen && (socket?.send(JSONObject().put("type", "hangup").put("callId", id).toString()) == true)
-            if (sent) delay(HANGUP_FLUSH_MILLIS)
-            closeLocal("hangup", LiveStatus.ENDED)
+            if(!sent){closeLocal("hangup_send_failed",LiveStatus.ERROR);return@launch}
+            hangupJob?.cancel();hangupJob=scope.launch{delay(HANGUP_ACK_MILLIS);if(_state.value.status !in setOf(LiveStatus.ENDED,LiveStatus.ERROR))closeLocal("hangup_timeout",LiveStatus.ERROR)}
         }
     }
 
@@ -173,7 +186,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             if (socket !== webSocket) return
             val event = runCatching { JSONObject(text) }.getOrNull() ?: return
             when (event.optString("type")) {
-                "ringing" -> update(LiveStatus.RINGING, event.optString("callId"), event.optString("peerUsername"))
+                "ringing" -> update(LiveStatus.RINGING, event.optString("callId"), event.optString("peerUsername"), notificationStatus = event.optString("notificationStatus"))
                 "incoming" -> {
                     callId = event.optString("callId")
                     peerUsername = event.optString("callerUsername")
@@ -202,7 +215,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
                 "error" -> {
                     lastError = event.optString("code", "Live call error")
                     CommunicationLog.warn("Live event error code=$lastError")
-                    closeLocal(lastError, LiveStatus.ERROR)
+                    closeLocal(liveErrorMessage(lastError), LiveStatus.ERROR)
                 }
             }
         }
@@ -230,9 +243,11 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         callId = event.optString("callId")
         peerUsername = event.optString("peerUsername", peerUsername)
         reconnectDeadlineMs = 0
+        generation=event.optInt("generation",generation+1)
         update(LiveStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
         startStreaming()
         callId?.let(audio::start)
+        healthJob?.cancel();healthJob=scope.launch{while(_state.value.status==LiveStatus.CONNECTED){delay(5_000);val a=audio.state.value;callId?.let{id->socket?.send(JSONObject().put("type","clientHealth").put("callId",id).put("diagnostics",JSONObject().put("sentBatches",sentBatches).put("receivedBatches",receivedBatchCount).put("hapticBufferedMs",diagnostics.value.bufferedMillis).put("hapticUnderruns",diagnostics.value.underruns).put("audioEncoded",a.encodedFrames).put("audioDecoded",a.decodedFrames).put("audioDropped",a.droppedFrames).put("audioDecoderErrors",a.decoderErrors).put("microphoneEnabled",a.microphoneEnabled).put("outputEnabled",a.outputEnabled)).toString())}}}
     }
 
     private fun startStreaming() {
@@ -243,7 +258,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             outgoing.clear()
         }
         socket?.send(
-            JSONObject().put("type", "start").put("streamId", streamId)
+            JSONObject().put("type", "start").put("callId",callId).put("streamId", streamId)
                 .put("recipientUsername", peerUsername).put("samplePeriodMs", SAMPLE_PERIOD_MS).toString(),
         )
         samplerJob = scope.launch {
@@ -257,19 +272,19 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         }
     }
 
-    private fun stopStreaming() {
+    private fun stopStreaming(notifyPeer: Boolean = true) {
         samplerJob?.cancel()
         samplerJob = null
         amplitude.set(0)
-        flush()
+        if (notifyPeer) flush()
         synchronized(outgoingLock) {
-            streamId?.let { socket?.send(JSONObject().put("type", "end").put("streamId", it).toString()) }
+            if (notifyPeer) streamId?.let { socket?.send(JSONObject().put("type", "end").put("callId",callId).put("streamId", it).toString()) }
             streamId = null
             outgoing.clear()
         }
         remoteStream = null
         player.reset(samplePeriodMs)
-        audio.stop()
+        audio.stop(notifyPeer)
     }
 
     private fun flush() {
@@ -278,10 +293,11 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             if (outgoing.isEmpty()) return
             val values = JSONArray(outgoing)
             socket?.send(
-                JSONObject().put("type", "samples").put("streamId", id)
+                JSONObject().put("type", "samples").put("callId",callId).put("streamId", id)
                     .put("startIndex", nextIndex).put("amplitudes", values).toString(),
             )
             nextIndex += outgoing.size
+            sentBatches++
             outgoing.clear()
         }
     }
@@ -313,7 +329,8 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
     }
 
     private fun handleUnexpectedDisconnect() {
-        stopStreaming()
+        // The transport is already gone, so media-end frames cannot be delivered.
+        stopStreaming(notifyPeer = false)
         if (_state.value.status == LiveStatus.CONNECTED || _state.value.status == LiveStatus.RECONNECTING) {
             if (reconnectDeadlineMs == 0L) reconnectDeadlineMs = System.currentTimeMillis() + RECONNECT_MILLIS
             update(LiveStatus.RECONNECTING, reason = "Connection lost")
@@ -330,6 +347,7 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
             while (!intentionalClose && System.currentTimeMillis() < reconnectDeadlineMs) {
                 delay(1_000)
                 if (socket == null) {
+                    reconnectAttempts++
                     val current = settings.current()
                     if (!current.isConfigured) break
                     if (resume) update(LiveStatus.RECONNECTING)
@@ -349,7 +367,10 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         intentionalClose = true
         reconnectJob?.cancel()
         reconnectJob = null
-        stopStreaming()
+        healthJob?.cancel();healthJob=null;hangupJob?.cancel();hangupJob=null
+        // The server removes the call before delivering its terminal acknowledgement;
+        // do not emit media-end frames after that acknowledgement.
+        stopStreaming(notifyPeer = false)
         socket?.close(1000, reason ?: "stopped")
         socket = null
         socketOpen = false
@@ -375,19 +396,35 @@ internal class LiveTouchCoordinator(private val context: Context, private val se
         peer: String = peerUsername,
         reason: String? = null,
         connectedAtMs: Long? = if (status == LiveStatus.CONNECTED) _state.value.connectedAtMs else null,
+        notificationStatus: String = _state.value.notificationStatus,
     ) {
         if (id != null) callId = id
         if (peer.isNotBlank()) peerUsername = peer
-        _state.value = LiveState(status, callId, peerUsername, reason, connectedAtMs)
+        _state.value = LiveState(status, callId, peerUsername, reason, connectedAtMs,generation,notificationStatus)
         _status.value = status
+        TouchCommunication.get(context).recordDiagnostic(
+            if(status==LiveStatus.ERROR)"error" else "info","call","state_${status.name.lowercase()}",
+            reason.orEmpty(),callId,mapOf("peer" to peerUsername.take(32),"generation" to generation,"socketOpen" to socketOpen),
+        )
     }
 
     companion object {
         const val SAMPLE_PERIOD_MS = 10
         const val BATCH_SAMPLES = 10
         const val RECONNECT_MILLIS = 30_000L
-        const val HANGUP_FLUSH_MILLIS = 150L
+        const val HANGUP_ACK_MILLIS = 1_000L
     }
+}
+
+internal fun liveErrorMessage(code:String?):String = when(code){
+    "RECIPIENT_UNAVAILABLE"->"Recipient is unavailable (RECIPIENT_UNAVAILABLE)"
+    "CALL_BUSY"->"One of the contacts is already in a call (CALL_BUSY)"
+    "CALL_UNAVAILABLE"->"The call expired or is unavailable (CALL_UNAVAILABLE)"
+    "INVALID_AUDIO"->"The live audio stream was rejected (INVALID_AUDIO)"
+    "INVALID_SAMPLES"->"The touch stream was rejected (INVALID_SAMPLES)"
+    "INVALID_EVENT"->"The server rejected a call event (INVALID_EVENT)"
+    null,""->"Unknown live call error"
+    else->"Live call failed ($code)"
 }
 
 private class LivePlaybackBuffer(context: Context, private val scope: CoroutineScope) {

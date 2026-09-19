@@ -10,8 +10,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.resume
@@ -22,6 +25,7 @@ class TouchCommunication private constructor(private val context: Context) {
     internal val dao = database.touchDao()
     internal val api = TouchApiClient()
     internal val live = LiveTouchCoordinator(context, settingsStore)
+    internal val diagnostics = DiagnosticReporter(dao)
     internal val platform: String = if (context.packageManager.hasSystemFeature("android.hardware.type.watch")) "watch" else "phone"
 
     val settings: Flow<CommunicationSettings> = settingsStore.settings
@@ -30,22 +34,23 @@ class TouchCommunication private constructor(private val context: Context) {
     val liveStatus = live.status
 	val liveState = live.state
     val liveAudioState = live.audioState
+    val liveDiagnostics = live.diagnostics
+    private val _contacts = MutableStateFlow<List<Contact>>(emptyList())
+    val contacts: StateFlow<List<Contact>> = _contacts
+    private val _installationStatus = MutableStateFlow<InstallationStatus?>(null)
+    val installationStatus: StateFlow<InstallationStatus?> = _installationStatus
 
-    fun startLive() = live.startCall()
-    fun prepareIncomingLive(callId: String, callerUsername: String) = live.prepareIncoming(callId, callerUsername)
-    fun acceptLive() = live.accept()
-    fun declineLive() = live.decline()
-    fun stopLive() = live.hangUp()
+    fun startLive() = LiveCallService.startOutgoing(context)
+    fun prepareIncomingLive(callId: String, callerUsername: String) = LiveCallService.startIncoming(context,callId,callerUsername,null)
+    fun acceptLive() = LiveCallService.command(context,LiveCallService.ACTION_ACCEPT)
+    fun declineLive() = LiveCallService.command(context,LiveCallService.ACTION_DECLINE)
+    fun stopLive() = LiveCallService.command(context,LiveCallService.ACTION_HANGUP)
     fun setLiveAmplitude(amplitude: Int) = live.setAmplitude(amplitude)
     fun setLiveMicrophoneEnabled(enabled: Boolean) = live.setMicrophoneEnabled(enabled)
     fun setLiveAudioOutputEnabled(allowSpeaker: Boolean) = live.setAudioOutputEnabled(allowSpeaker)
     fun onAudioRouteChanged() = live.onAudioRouteChanged()
     fun onBackground() {
-        if (live.state.value.status in setOf(
-                LiveStatus.CONNECTING, LiveStatus.RINGING, LiveStatus.INCOMING,
-                LiveStatus.CONNECTED, LiveStatus.RECONNECTING,
-            )
-        ) live.hangUp()
+        // The foreground call service owns active calls across screen dimming and activity changes.
     }
 
     suspend fun initialize() {
@@ -54,12 +59,14 @@ class TouchCommunication private constructor(private val context: Context) {
         CommunicationWork.enqueueRegistration(context)
         CommunicationWork.enqueueSync(context)
         CommunicationWork.enqueueOutbox(context)
+        CommunicationWork.enqueueDiagnostics(context)
+        refreshDirectory()
     }
 
     suspend fun configure(backendUrl: String, username: String, peerUsername: String) {
         require(backendUrl.startsWith("http://") || backendUrl.startsWith("https://"))
         require(username.matches(HANDLE_PATTERN))
-        require(peerUsername.matches(HANDLE_PATTERN))
+        require(peerUsername.isBlank() || peerUsername.matches(HANDLE_PATTERN))
         settingsStore.ensureInstallationId()
         settingsStore.saveConnection(backendUrl, username, peerUsername)
         refreshFcmToken()
@@ -74,6 +81,7 @@ class TouchCommunication private constructor(private val context: Context) {
         require(!touch.isSilent && touch.amplitudes.isNotEmpty())
         val current = settingsStore.current()
         require(current.isConfigured) { "Communication setup is incomplete" }
+        require(current.peerUsername.matches(HANDLE_PATTERN)) { "Choose a contact first" }
         dao.insertOutbox(
             OutboxTouchEntity(
                 clientMessageId = id,
@@ -96,6 +104,8 @@ class TouchCommunication private constructor(private val context: Context) {
         CommunicationWork.enqueueRegistration(context)
         CommunicationWork.enqueueSync(context)
         CommunicationWork.enqueueOutbox(context)
+        CommunicationWork.enqueueDiagnostics(context)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { refreshDirectory() }
     }
 
     fun syncInbox() {
@@ -111,6 +121,22 @@ class TouchCommunication private constructor(private val context: Context) {
     suspend fun playAudio(item: InboxTouch, allowSpeaker: Boolean): Boolean = AudioPlaybackCoordinator.play(context, dao, item, allowSpeaker)
     suspend fun previewAudio(audio: AudioAttachment?, allowSpeaker: Boolean): Boolean = AudioPlaybackCoordinator.playAttachment(context, audio, allowSpeaker)
     fun stopAudio() = AudioPlaybackCoordinator.stop()
+
+    suspend fun refreshDirectory() {
+        val current=settingsStore.current(); if(!current.isConfigured)return
+        runCatching { _contacts.value=api.contacts(current); _installationStatus.value=api.installationStatus(current) }
+    }
+    suspend fun selectContact(username:String) { val current=settingsStore.current(); settingsStore.saveConnection(current.backendUrl,current.username,username); refreshDirectory() }
+    suspend fun addContact(username:String) { api.addContact(settingsStore.current(),username); selectContact(username) }
+    suspend fun removeContact(username:String) { api.removeContact(settingsStore.current(),username); refreshDirectory() }
+    suspend fun verifyNotifications(onUpdate:(PushTest)->Unit): PushTest {
+        val current=settingsStore.current(); var result=api.startPushTest(current);onUpdate(result)
+        repeat(15){ if(result.status!="pending")return result;delay(2_000);result=api.pushTest(current,result.testId);onUpdate(result) }
+        return result
+    }
+    internal fun recordDiagnostic(severity:String,category:String,name:String,message:String="",callId:String?=null,attributes:Map<String,Any?> = emptyMap()) {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { diagnostics.record(severity,category,name,message,callId=callId,attributes=attributes);CommunicationWork.enqueueDiagnostics(context) }
+    }
 
     suspend fun clearInbox() {
         PlaybackCoordinator.cancel()

@@ -10,6 +10,9 @@ import android.os.Looper
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.provider.Settings
+import android.net.Uri
+import android.app.NotificationManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -122,6 +125,11 @@ class MainActivity : ComponentActivity() {
     }
 
     fun requestMicrophonePermission() = requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
+    fun requestFullScreenCalls(){if(Build.VERSION.SDK_INT>=34&&!getSystemService(NotificationManager::class.java).canUseFullScreenIntent())startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,Uri.parse("package:$packageName")))}
+}
+
+class IncomingCallActivity:ComponentActivity(){
+    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setShowWhenLocked(true);setTurnScreenOn(true);app.touch.communication.LiveCallService.command(this,app.touch.communication.LiveCallService.ACTION_OPENED);val caller=intent.getStringExtra(app.touch.communication.LiveCallService.EXTRA_CALLER).orEmpty();val callId=intent.getStringExtra(app.touch.communication.LiveCallService.EXTRA_CALL_ID);setContent{MaterialTheme{Surface(color=Paper,modifier=Modifier.fillMaxSize()){Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center,modifier=Modifier.padding(24.dp)){Text("Live touch from",fontSize=18.sp);Text(caller,fontSize=32.sp,color=Signal);Spacer(Modifier.height(24.dp));Row(horizontalArrangement=Arrangement.spacedBy(16.dp)){Button(onClick={app.touch.communication.LiveCallService.command(this@IncomingCallActivity,app.touch.communication.LiveCallService.ACTION_DECLINE);finish()},colors=ButtonDefaults.buttonColors(containerColor=Ink)){Text("Decline")};Button(onClick={if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO),101);app.touch.communication.LiveCallService.command(this@IncomingCallActivity,app.touch.communication.LiveCallService.ACTION_ACCEPT);packageManager.getLaunchIntentForPackage(packageName)?.putExtra(TouchNotificationIntents.EXTRA_LIVE_CALL_ID,callId)?.putExtra(TouchNotificationIntents.EXTRA_LIVE_CALLER,caller)?.let(::startActivity);finish()},colors=ButtonDefaults.buttonColors(containerColor=Signal)){Text("Answer")}}}}}}}
 }
 
 private data class DebugSetup(val backend: String, val username: String, val peer: String)
@@ -147,6 +155,7 @@ private fun TouchMobileApp(
 ) {
     MaterialTheme {
         val settings by communication.settings.collectAsState(initial = CommunicationSettings())
+        val currentLive by communication.liveState.collectAsState()
         var screen by remember { mutableStateOf<Screen?>(null) }
         var liveIncoming by remember { mutableStateOf(false) }
         val invite by incomingInvite.collectAsState()
@@ -159,12 +168,12 @@ private fun TouchMobileApp(
         }
         LaunchedEffect(settings) {
             if (screen == null && settings.installationId.isNotBlank()) {
-                screen = if (settings.isConfigured) Screen.RECORDER else Screen.SETUP
+                screen = if (!settings.isConfigured) Screen.SETUP else if(currentLive.status in setOf(LiveStatus.CONNECTING,LiveStatus.RINGING,LiveStatus.INCOMING,LiveStatus.CONNECTED,LiveStatus.RECONNECTING))Screen.LIVE else Screen.RECORDER
             }
         }
         LaunchedEffect(invite) {
             invite?.let {
-                communication.prepareIncomingLive(it.callId, it.callerUsername)
+                if(communication.liveState.value.callId!=it.callId)communication.prepareIncomingLive(it.callId, it.callerUsername)
                 liveIncoming = true
                 screen = Screen.LIVE
                 incomingInvite.value = null
@@ -174,7 +183,7 @@ private fun TouchMobileApp(
             when (screen) {
                 Screen.SETUP -> SetupScreen(settings, communication) { screen = Screen.RECORDER }
                 Screen.INBOX -> InboxScreen(communication) { screen = Screen.RECORDER }
-                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming) { screen = Screen.RECORDER }
+                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming && currentLive.status !in setOf(LiveStatus.CONNECTING,LiveStatus.RINGING,LiveStatus.INCOMING,LiveStatus.CONNECTED,LiveStatus.RECONNECTING)) { screen = Screen.RECORDER }
                 Screen.RECORDER -> RecorderScreen(communication, settings.username, { liveIncoming = false; screen = Screen.LIVE }, { screen = Screen.INBOX }, { screen = Screen.SETUP })
                 null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Starting…") }
             }
@@ -184,20 +193,26 @@ private fun TouchMobileApp(
 
 @Composable
 private fun SetupScreen(settings: CommunicationSettings, communication: TouchCommunication, onBack: () -> Unit) {
+    val context=androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
+    val contacts by communication.contacts.collectAsState()
+    val serverStatus by communication.installationStatus.collectAsState()
     var backend by remember(settings.backendUrl) { mutableStateOf(settings.backendUrl.ifBlank { "http://192.168.1.2:8080" }) }
     var username by remember(settings.username) { mutableStateOf(settings.username) }
     var peer by remember(settings.peerUsername) { mutableStateOf(settings.peerUsername) }
     var error by remember { mutableStateOf<String?>(null) }
+    var pushStatus by remember { mutableStateOf<String?>(null) }
     Column(verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp)) {
         Text("Connect Touch", fontSize = 28.sp, color = Ink)
-        Text("Each installation has its own username and one saved recipient.", color = Ink.copy(alpha = .65f))
+        Text("Register this device, then add or choose recent contacts.", color = Ink.copy(alpha = .65f))
         Spacer(Modifier.height(18.dp))
         OutlinedTextField(backend, { backend = it }, label = { Text("LAN backend URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(username, { username = it }, label = { Text("This username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(peer, { peer = it }, label = { Text("Peer username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(peer, { peer = it }, label = { Text("Contact username (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        serverStatus?.let { Text("Server: ${it.username} · FCM ${if(it.fcmTokenPresent) it.fcmTokenFingerprint ?: "registered" else "missing"}",fontSize=12.sp,color=Ink.copy(alpha=.65f)) }
+        contacts.take(5).forEach { contact -> Row(verticalAlignment=Alignment.CenterVertically){TextButton(onClick={scope.launch{communication.selectContact(contact.username);peer=contact.username}}){Text(if(contact.username==settings.peerUsername)"✓ ${contact.username}" else contact.username)};if(contact.saved)TextButton(onClick={scope.launch{communication.removeContact(contact.username)}}){Text("Remove")}} }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -205,10 +220,14 @@ private fun SetupScreen(settings: CommunicationSettings, communication: TouchCom
             Button(onClick = {
                 scope.launch {
                     error = runCatching { communication.configure(backend, username, peer) }.exceptionOrNull()?.message
+                    if(error==null&&peer.isNotBlank())error=runCatching{communication.addContact(peer)}.exceptionOrNull()?.message
                     if (error == null) onBack()
                 }
             }) { Text("Save") }
+            if(settings.isConfigured)Button(onClick={scope.launch{runCatching{communication.verifyNotifications{pushStatus=it.status}}.onFailure{pushStatus=it.message}}}){Text("Verify notifications")}
+            if(Build.VERSION.SDK_INT>=34)TextButton(onClick={ (context as? MainActivity)?.requestFullScreenCalls() }){Text("Enable call overlays")}
         }
+        pushStatus?.let{Text("Push test: $it",fontSize=12.sp,color=Ink.copy(alpha=.65f))}
     }
 }
 
@@ -226,6 +245,8 @@ private fun RecorderScreen(
     val player = remember { AndroidTouchPlayer(context.applicationContext) }
     val audioCapture = remember { RecordedAudioCapture(context.applicationContext) }
     val outbox by communication.outbox.collectAsState(initial = emptyList())
+    val settings by communication.settings.collectAsState(initial=CommunicationSettings())
+    val contacts by communication.contacts.collectAsState()
     var recording by remember { mutableStateOf(false) }
     var elapsedMillis by remember { mutableIntStateOf(0) }
     var touch by remember { mutableStateOf<Touch?>(null) }
@@ -275,6 +296,7 @@ private fun RecorderScreen(
             Text(formatDuration(elapsedMillis), color = Ink.copy(alpha = .65f), fontSize = 16.sp)
         }
         Text(if (recording) "Move higher for a stronger pulse" else "Draw a vibration with your fingertips", color = Ink.copy(alpha = .65f), fontSize = 14.sp)
+        Row(horizontalArrangement=Arrangement.spacedBy(4.dp),modifier=Modifier.fillMaxWidth()){contacts.take(4).forEach{contact->TextButton(onClick={scope.launch{communication.selectContact(contact.username)}}){Text(if(contact.username==settings.peerUsername)"✓ ${contact.username}" else contact.username,fontSize=12.sp)}}}
         Spacer(Modifier.height(16.dp))
         RecordingPad(recorder, recording, if (recording) null else touch, Modifier.weight(1f))
         sendStatus?.let { Text("Send: ${it.name.lowercase()}", color = Ink.copy(alpha = .65f), modifier = Modifier.padding(top = 8.dp)) }
@@ -306,7 +328,7 @@ private fun RecorderScreen(
                         }
                     }
                 }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(containerColor = Ink), modifier = Modifier.width(92.dp)) { Text("Play") }
-                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it, audio) } } }, enabled = touch?.isSilent == false && sendStatus != OutboxStatus.SENDING, modifier = Modifier.width(92.dp)) { Text("Send") }
+                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it, audio) } } }, enabled = touch?.isSilent == false && sendStatus != OutboxStatus.SENDING && settings.peerUsername.isNotBlank(), modifier = Modifier.width(92.dp)) { Text("Send") }
             }
             TextButton(onClick = onLive) { Text("Go live") }
         }
@@ -318,8 +340,12 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
     val context = androidx.compose.ui.platform.LocalContext.current
     val live by communication.liveState.collectAsState()
     val audio by communication.liveAudioState.collectAsState()
+    val diagnostics by communication.liveDiagnostics.collectAsState()
+    var details by remember{mutableStateOf(false)}
     var elapsed by remember { mutableIntStateOf(0) }
-    LaunchedEffect(autoStart) { if (autoStart) communication.startLive() }
+    // Start once when the user enters Live. Do not restart after hangup changes
+    // the derived autoStart value from false back to true.
+    LaunchedEffect(Unit) { if (autoStart) communication.startLive() }
     LaunchedEffect(live.connectedAtMs) {
         val connectedAt = live.connectedAtMs ?: return@LaunchedEffect
         while (true) {
@@ -355,6 +381,9 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
             }) { Text("Back") }
         }
         Text(statusText, color = Ink.copy(alpha = .7f))
+        Text("Peer ${live.peerUsername.ifBlank{"—"}} · invite ${live.notificationStatus.ifBlank{"—"}} · generation ${live.generation} · route ${if(audio.outputEnabled)if(audio.privateRoute)"headphones" else "speaker" else "muted"}",fontSize=12.sp,color=Ink.copy(alpha=.6f))
+        TextButton(onClick={details=!details}){Text(if(details)"Hide diagnostics" else "Show diagnostics")}
+        if(details)Text("Haptics buffer ${diagnostics.bufferedMillis} ms, underruns ${diagnostics.underruns}, gaps ${diagnostics.outOfOrderBatches}. Audio encoded ${audio.encodedFrames}, decoded ${audio.decodedFrames}, dropped ${audio.droppedFrames}, decoder errors ${audio.decoderErrors}",fontSize=11.sp,color=Ink.copy(alpha=.6f))
         Spacer(Modifier.height(16.dp))
         Box(
             Modifier.weight(1f).fillMaxWidth()

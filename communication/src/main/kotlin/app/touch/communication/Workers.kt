@@ -9,6 +9,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.Constraints
+import androidx.work.workDataOf
 import java.io.IOException
 
 internal object CommunicationWork {
@@ -19,8 +20,13 @@ internal object CommunicationWork {
     // appending behind an ENQUEUED retry) can otherwise make foreground sync wait for hours.
     fun enqueueRegistration(context: Context) = enqueue<RegistrationWorker>(context, "touch-registration", ExistingWorkPolicy.REPLACE)
     fun enqueueOutbox(context: Context) = enqueue<OutboxWorker>(context, "touch-outbox", ExistingWorkPolicy.REPLACE)
-    fun enqueueSync(context: Context) = enqueue<InboxSyncWorker>(context, "touch-inbox-sync", ExistingWorkPolicy.REPLACE)
+    fun enqueueSync(context: Context, deliveryId:String?=null) {
+        val builder=OneTimeWorkRequestBuilder<InboxSyncWorker>().setConstraints(network)
+        if(deliveryId!=null)builder.setInputData(workDataOf("deliveryId" to deliveryId))
+        WorkManager.getInstance(context).enqueueUniqueWork("touch-inbox-sync",ExistingWorkPolicy.REPLACE,builder.build())
+    }
     fun enqueueAutoPlay(context: Context) = enqueue<AutoPlayWorker>(context, "touch-auto-play", ExistingWorkPolicy.KEEP, requiresNetwork = false)
+    fun enqueueDiagnostics(context: Context) = enqueue<DiagnosticsWorker>(context, "touch-diagnostics", ExistingWorkPolicy.REPLACE)
 
     private inline fun <reified T : ListenableWorker> enqueue(
         context: Context,
@@ -114,11 +120,17 @@ internal class InboxSyncWorker(context: Context, params: WorkerParameters) : Cor
                 if (result != -1L) inserted++
             }
             communication.dao.trimInbox()
-            if (inserted > 0) TouchNotifications.show(applicationContext, inserted)
+            val deliveryId=inputData.getString("deliveryId")
+            if (inserted > 0) {
+                TouchNotifications.show(applicationContext, inserted)
+                if(deliveryId!=null)runCatching{communication.api.notificationEvent(settings,deliveryId,"notification_presented")}
+            }
             PlaybackCoordinator.playFresh(applicationContext, communication)
             pending.forEach { remote -> communication.api.ack(settings, remote.touchId, "persisted") }
+            if(deliveryId!=null)runCatching{communication.api.notificationEvent(settings,deliveryId,"sync_succeeded")}
             Result.success()
         } catch (_: IOException) {
+            inputData.getString("deliveryId")?.let{id->runCatching{communication.api.notificationEvent(settings,id,"sync_failed")}}
             Result.retry()
         }
     }
@@ -128,6 +140,19 @@ internal class AutoPlayWorker(context: Context, params: WorkerParameters) : Coro
     override suspend fun doWork(): Result {
         PlaybackCoordinator.playFresh(applicationContext, TouchCommunication.get(applicationContext))
         return Result.success()
+    }
+}
+
+internal class DiagnosticsWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val communication=TouchCommunication.get(applicationContext)
+        val settings=communication.settingsStore.current()
+        if(!settings.isConfigured)return Result.success()
+        return try {
+            val events=communication.dao.pendingDiagnostics()
+            if(events.isNotEmpty()){communication.api.uploadDiagnostics(settings,events);communication.dao.deleteDiagnostics(events.map{it.eventId})}
+            Result.success()
+        } catch (_:IOException){Result.retry()}
     }
 }
 

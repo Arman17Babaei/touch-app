@@ -9,6 +9,7 @@ services:
       TOUCH_FIREBASE_PROJECT_ID: "${TOUCH_FIREBASE_PROJECT_ID:-}"
       GOOGLE_APPLICATION_CREDENTIALS: "${GOOGLE_APPLICATION_CREDENTIALS:-}"
       TOUCH_LOG_LEVEL: "${TOUCH_LOG_LEVEL:-info}"
+      TOUCH_ADMIN_TOKEN: "${TOUCH_ADMIN_TOKEN:-}"
     volumes:
       - touch-data:/data
       - ./secrets:/secrets:ro

@@ -11,24 +11,31 @@ import (
 )
 
 type Notifier interface {
-	NotifyTouch(ctx context.Context, token, touchID string) error
-	NotifyLiveInvite(ctx context.Context, token, callID, callerUsername string) error
+	NotifyTouch(ctx context.Context, token, touchID, deliveryID string) (string, error)
+	NotifyLiveInvite(ctx context.Context, token, callID, callerUsername, deliveryID string) (string, error)
+	NotifyPushTest(ctx context.Context, token, testID string) (string, error)
 }
 
 type logNotifier struct{}
 
-func (logNotifier) NotifyTouch(_ context.Context, token, touchID string) error {
+func (logNotifier) NotifyTouch(_ context.Context, token, touchID, deliveryID string) (string, error) {
 	if token != "" {
 		logAt(warnLevel, "fcm disabled notification=touch touch_id=%s", touchID)
 	}
-	return nil
+	return "", nil
 }
 
-func (logNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername string) error {
+func (logNotifier) NotifyLiveInvite(_ context.Context, token, callID, callerUsername, deliveryID string) (string, error) {
 	if token != "" {
 		logAt(warnLevel, "fcm disabled notification=live_invite call_id=%s caller=%s", callID, callerUsername)
 	}
-	return nil
+	return "", nil
+}
+func (logNotifier) NotifyPushTest(_ context.Context, token, testID string) (string, error) {
+	if token != "" {
+		logAt(warnLevel, "fcm disabled notification=push_test test_id=%s", testID)
+	}
+	return "", nil
 }
 
 type fcmNotifier struct {
@@ -52,15 +59,16 @@ func NewNotifier(ctx context.Context, projectID, credentialsFile string) (Notifi
 	return &fcmNotifier{client: client}, nil
 }
 
-func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID string) error {
+func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID, deliveryID string) (string, error) {
 	if token == "" {
-		return nil
+		return "", nil
 	}
 	messageID, err := n.client.Send(ctx, &messaging.Message{
 		Token: token,
 		Data: map[string]string{
-			"type":    "touch_available",
-			"touchId": touchID,
+			"type":       "touch_available",
+			"touchId":    touchID,
+			"deliveryId": deliveryID,
 		},
 		Android: &messaging.AndroidConfig{Priority: "high"},
 	})
@@ -69,12 +77,12 @@ func (n *fcmNotifier) NotifyTouch(ctx context.Context, token, touchID string) er
 	} else {
 		logAt(debugLevel, "fcm send succeeded notification=touch touch_id=%s message_id=%s", touchID, messageID)
 	}
-	return err
+	return messageID, err
 }
 
-func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, callerUsername string) error {
+func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, callerUsername, deliveryID string) (string, error) {
 	if token == "" {
-		return nil
+		return "", nil
 	}
 	ttl := 60 * time.Second
 	messageID, err := n.client.Send(ctx, &messaging.Message{
@@ -83,6 +91,7 @@ func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, calle
 			"type":           "live_invite",
 			"callId":         callID,
 			"callerUsername": callerUsername,
+			"deliveryId":     deliveryID,
 		},
 		Android: &messaging.AndroidConfig{Priority: "high", TTL: &ttl},
 	})
@@ -91,5 +100,16 @@ func (n *fcmNotifier) NotifyLiveInvite(ctx context.Context, token, callID, calle
 	} else {
 		logAt(debugLevel, "fcm send succeeded notification=live_invite call_id=%s message_id=%s", callID, messageID)
 	}
-	return err
+	return messageID, err
+}
+
+func (n *fcmNotifier) NotifyPushTest(ctx context.Context, token, testID string) (string, error) {
+	if token == "" {
+		return "", fmt.Errorf("FCM token is empty")
+	}
+	messageID, err := n.client.Send(ctx, &messaging.Message{Token: token, Data: map[string]string{"type": "push_test", "testId": testID}, Android: &messaging.AndroidConfig{Priority: "high"}})
+	if err != nil {
+		logAt(errorLevel, "fcm send failed notification=push_test test_id=%s error=%v", testID, err)
+	}
+	return messageID, err
 }

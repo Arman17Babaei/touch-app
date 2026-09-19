@@ -93,6 +93,50 @@ CREATE TABLE IF NOT EXISTS touches (
 CREATE INDEX IF NOT EXISTS idx_touches_recipient_pending
     ON touches(recipient_installation_id, received_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_touches_expires_at ON touches(expires_at);
+CREATE TABLE IF NOT EXISTS contacts (
+    owner_installation_id TEXT NOT NULL REFERENCES installations(id),
+    contact_installation_id TEXT NOT NULL REFERENCES installations(id),
+    saved INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(owner_installation_id, contact_installation_id)
+);
+CREATE TABLE IF NOT EXISTS diagnostic_events (
+    event_id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+    severity TEXT NOT NULL, category TEXT NOT NULL, name TEXT NOT NULL,
+    call_id TEXT, touch_id TEXT, client_message_id TEXT, message TEXT NOT NULL DEFAULT '', attributes_json TEXT NOT NULL DEFAULT '{}', received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_diagnostics_time ON diagnostic_events(received_at);
+CREATE INDEX IF NOT EXISTS idx_diagnostics_call ON diagnostic_events(call_id, occurred_at);
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, reference_id TEXT NOT NULL,
+    sender_installation_id TEXT, recipient_installation_id TEXT NOT NULL,
+    status TEXT NOT NULL, provider_message_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL, received_at INTEGER, presented_at INTEGER, opened_at INTEGER, action_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_reference ON notification_deliveries(reference_id);
+CREATE TABLE IF NOT EXISTS notification_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, delivery_id TEXT NOT NULL,
+    event TEXT NOT NULL, occurred_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_delivery ON notification_events(delivery_id, occurred_at);
+CREATE TABLE IF NOT EXISTS push_tests (
+    id TEXT PRIMARY KEY, installation_id TEXT NOT NULL REFERENCES installations(id), status TEXT NOT NULL,
+    provider_message_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, completed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS call_sessions (
+    id TEXT PRIMARY KEY, caller_installation_id TEXT NOT NULL, recipient_installation_id TEXT NOT NULL,
+    caller_username TEXT NOT NULL, recipient_username TEXT NOT NULL, state TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, accepted_at INTEGER,
+    connected_at INTEGER, ended_at INTEGER, terminal_reason TEXT NOT NULL DEFAULT '',
+    haptic_frames INTEGER NOT NULL DEFAULT 0, audio_frames INTEGER NOT NULL DEFAULT 0,
+    audio_bytes INTEGER NOT NULL DEFAULT 0, queue_drops INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS call_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT NOT NULL, installation_id TEXT,
+    event TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', occurred_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_call_events_call ON call_events(call_id, occurred_at);
 `)
 	if err != nil {
 		return err

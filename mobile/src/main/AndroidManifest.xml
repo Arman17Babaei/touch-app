@@ -17,5 +17,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".IncomingCallActivity" android:exported="false" android:excludeFromRecents="true" android:showWhenLocked="true" android:turnScreenOn="true" />
     </application>
 </manifest>

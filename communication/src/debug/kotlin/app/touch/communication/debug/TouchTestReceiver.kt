@@ -20,9 +20,15 @@ class TouchTestReceiver : BroadcastReceiver() {
                 "enqueueTouch" -> communication.enqueue(Touch(intent.getIntExtra("samplePeriodMs", 10), intent.require("amplitudes").split(',').filter { it.isNotBlank() }.map { it.toInt() }), intent.require("clientMessageId"))
                 "sync" -> communication.syncInbox()
                 "liveStart" -> communication.startLive()
+                "liveAccept" -> communication.acceptLive()
+                "liveDecline" -> communication.declineLive()
                 "liveBegin" -> Unit
                 "liveSample" -> communication.setLiveAmplitude(intent.getIntExtra("amplitude", 0))
                 "liveEnd" -> communication.setLiveAmplitude(0)
+                "liveMicOn" -> communication.setLiveMicrophoneEnabled(true)
+                "liveMicOff" -> communication.setLiveMicrophoneEnabled(false)
+                "liveAudioOn" -> communication.setLiveAudioOutputEnabled(true)
+                "liveAudioOff" -> communication.setLiveAudioOutputEnabled(false)
                 "liveStop" -> communication.stopLive()
                 "state" -> Unit
                 else -> error("unknown command")

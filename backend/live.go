@@ -21,6 +21,7 @@ type LiveHub struct {
 	clients          map[string]*liveClient
 	calls            map[string]*liveCall
 	notifier         Notifier
+	store            *Store
 	now              func() time.Time
 	ringTimeout      time.Duration
 	reconnectTimeout time.Duration
@@ -31,6 +32,7 @@ type liveClient struct {
 	username          string
 	conn              *websocket.Conn
 	send              chan []byte
+	control           chan []byte
 	done              chan struct{}
 	peerID            string
 	streamID          string
@@ -52,28 +54,32 @@ type liveCall struct {
 }
 
 type liveEvent struct {
-	Type              string `json:"type"`
-	CallID            string `json:"callId,omitempty"`
-	CallerUsername    string `json:"callerUsername,omitempty"`
-	PeerUsername      string `json:"peerUsername,omitempty"`
-	Reason            string `json:"reason,omitempty"`
-	Generation        int    `json:"generation,omitempty"`
-	StreamID          string `json:"streamId,omitempty"`
-	RecipientUsername string `json:"recipientUsername,omitempty"`
-	SamplePeriodMs    int    `json:"samplePeriodMs,omitempty"`
-	StartIndex        *int   `json:"startIndex,omitempty"`
-	Amplitudes        []int  `json:"amplitudes,omitempty"`
-	Codec             string `json:"codec,omitempty"`
-	SampleRateHz      int    `json:"sampleRateHz,omitempty"`
-	ChannelCount      int    `json:"channelCount,omitempty"`
-	AudioSequence     *int   `json:"audioSequence,omitempty"`
-	AudioData         []byte `json:"audioData,omitempty"`
-	Code              string `json:"code,omitempty"`
+	Type               string         `json:"type"`
+	CallID             string         `json:"callId,omitempty"`
+	CallerUsername     string         `json:"callerUsername,omitempty"`
+	PeerUsername       string         `json:"peerUsername,omitempty"`
+	Reason             string         `json:"reason,omitempty"`
+	Generation         int            `json:"generation,omitempty"`
+	StreamID           string         `json:"streamId,omitempty"`
+	RecipientUsername  string         `json:"recipientUsername,omitempty"`
+	SamplePeriodMs     int            `json:"samplePeriodMs,omitempty"`
+	StartIndex         *int           `json:"startIndex,omitempty"`
+	Amplitudes         []int          `json:"amplitudes,omitempty"`
+	Codec              string         `json:"codec,omitempty"`
+	SampleRateHz       int            `json:"sampleRateHz,omitempty"`
+	ChannelCount       int            `json:"channelCount,omitempty"`
+	AudioSequence      *int           `json:"audioSequence,omitempty"`
+	AudioData          []byte         `json:"audioData,omitempty"`
+	CodecConfig        []byte         `json:"codecConfig,omitempty"`
+	PresentationTimeUs int64          `json:"presentationTimeUs,omitempty"`
+	Diagnostics        map[string]any `json:"diagnostics,omitempty"`
+	NotificationStatus string         `json:"notificationStatus,omitempty"`
+	Code               string         `json:"code,omitempty"`
 }
 
-func NewLiveHub(notifier Notifier, now func() time.Time) *LiveHub {
+func NewLiveHub(store *Store, notifier Notifier, now func() time.Time) *LiveHub {
 	return &LiveHub{
-		clients: map[string]*liveClient{}, calls: map[string]*liveCall{}, notifier: notifier, now: now,
+		clients: map[string]*liveClient{}, calls: map[string]*liveCall{}, store: store, notifier: notifier, now: now,
 		ringTimeout: defaultRingTimeout, reconnectTimeout: defaultReconnectTimeout,
 	}
 }
@@ -100,7 +106,7 @@ func (h *LiveHub) connect(ctx context.Context, conn *websocket.Conn, installatio
 	// Audio can briefly burst while a handset is busy. Keep a bounded but large
 	// enough relay queue so an ordinary burst does not create a permanent gap in
 	// the separately sequenced haptic stream.
-	client := &liveClient{id: installation.ID, username: installation.Handle, conn: conn, send: make(chan []byte, 256), done: make(chan struct{})}
+	client := &liveClient{id: installation.ID, username: installation.Handle, conn: conn, send: make(chan []byte, 256), control: make(chan []byte, 64), done: make(chan struct{})}
 	h.mu.Lock()
 	if old := h.clients[client.id]; old != nil {
 		_ = old.conn.Close()
@@ -125,13 +131,26 @@ func (h *LiveHub) connect(ctx context.Context, conn *websocket.Conn, installatio
 	go func() {
 		for {
 			select {
-			case raw := <-client.send:
+			case raw := <-client.control:
 				if websocket.Message.Send(conn, string(raw)) != nil {
 					_ = conn.Close()
 					return
 				}
-			case <-client.done:
-				return
+			default:
+				select {
+				case raw := <-client.control:
+					if websocket.Message.Send(conn, string(raw)) != nil {
+						_ = conn.Close()
+						return
+					}
+				case raw := <-client.send:
+					if websocket.Message.Send(conn, string(raw)) != nil {
+						_ = conn.Close()
+						return
+					}
+				case <-client.done:
+					return
+				}
 			}
 		}
 	}()
@@ -159,6 +178,8 @@ func (h *LiveHub) connect(ctx context.Context, conn *websocket.Conn, installatio
 			h.finishCall(client, event.CallID, "hangup")
 		case "audioStart", "audioFrame", "audioEnd":
 			h.handleAudio(client, event)
+		case "clientHealth":
+			h.handleClientHealth(client, event)
 		default:
 			h.handleLegacy(ctx, client, event, store)
 		}
@@ -182,12 +203,13 @@ func (h *LiveHub) handleAudio(client *liveClient, event liveEvent) {
 	peer := h.clients[peerID]
 	switch event.Type {
 	case "audioStart":
-		if !uuidPattern.MatchString(event.StreamID) || event.Codec != "aac-lc" || event.SampleRateHz != 16000 || event.ChannelCount != 1 {
+		if !uuidPattern.MatchString(event.StreamID) || event.Codec != "aac-lc" || event.SampleRateHz != 16000 || event.ChannelCount != 1 || len(event.CodecConfig) == 0 || len(event.CodecConfig) > 128 {
 			h.mu.Unlock()
 			h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_AUDIO"})
 			return
 		}
 		client.audioStreamID, client.nextAudioSequence = event.StreamID, 0
+		h.store.recordCallEvent(event.CallID, client.id, "audio_start", map[string]any{"streamId": event.StreamID}, h.now().UnixMilli())
 	case "audioFrame":
 		if event.StreamID != client.audioStreamID || event.AudioSequence == nil || *event.AudioSequence != client.nextAudioSequence || len(event.AudioData) == 0 || len(event.AudioData) > 16*1024 {
 			h.mu.Unlock()
@@ -195,6 +217,7 @@ func (h *LiveHub) handleAudio(client *liveClient, event liveEvent) {
 			return
 		}
 		client.nextAudioSequence++
+		_, _ = h.store.db.Exec(`UPDATE call_sessions SET audio_frames=audio_frames+1,audio_bytes=audio_bytes+? WHERE id=?`, len(event.AudioData), event.CallID)
 	case "audioEnd":
 		if event.StreamID != client.audioStreamID {
 			h.mu.Unlock()
@@ -202,6 +225,7 @@ func (h *LiveHub) handleAudio(client *liveClient, event liveEvent) {
 			return
 		}
 		client.audioStreamID, client.nextAudioSequence = "", 0
+		h.store.recordCallEvent(event.CallID, client.id, "audio_end", map[string]any{"streamId": event.StreamID}, h.now().UnixMilli())
 	}
 	h.mu.Unlock()
 	if peer != nil {
@@ -210,6 +234,22 @@ func (h *LiveHub) handleAudio(client *liveClient, event liveEvent) {
 	} else {
 		h.reply(client, liveEvent{Type: "peerUnavailable", CallID: event.CallID})
 	}
+}
+
+func (h *LiveHub) handleClientHealth(client *liveClient, event liveEvent) {
+	if event.CallID == "" || len(event.Diagnostics) > 32 {
+		h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "INVALID_EVENT"})
+		return
+	}
+	h.mu.Lock()
+	call := h.calls[event.CallID]
+	valid := call != nil && (call.callerID == client.id || call.recipientID == client.id)
+	h.mu.Unlock()
+	if !valid {
+		h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "CALL_UNAVAILABLE"})
+		return
+	}
+	h.store.recordCallEvent(event.CallID, client.id, "client_health", event.Diagnostics, h.now().UnixMilli())
 }
 
 func (h *LiveHub) startCall(ctx context.Context, client *liveClient, event liveEvent, store *Store) {
@@ -249,13 +289,25 @@ func (h *LiveHub) startCall(ctx context.Context, client *liveClient, event liveE
 	h.calls[call.id] = call
 	recipientClient := h.clients[recipient.ID]
 	h.mu.Unlock()
+	_, _ = store.db.ExecContext(ctx, `INSERT INTO call_sessions(id,caller_installation_id,recipient_installation_id,caller_username,recipient_username,state,created_at) VALUES(?,?,?,?,?,'ringing',?)`, call.id, call.callerID, call.recipientID, call.callerUsername, call.recipientUsername, h.now().UnixMilli())
+	store.recordCallEvent(call.id, client.id, "ringing", map[string]any{"recipient": call.recipientUsername}, h.now().UnixMilli())
+	store.markRecent(client.id, recipient.Handle, h.now().UnixMilli())
+	store.markRecent(recipient.ID, client.username, h.now().UnixMilli())
 
-	h.reply(client, liveEvent{Type: "ringing", CallID: call.id, PeerUsername: call.recipientUsername})
+	notificationStatus := "direct"
 	if recipientClient != nil {
 		h.reply(recipientClient, liveEvent{Type: "incoming", CallID: call.id, CallerUsername: call.callerUsername})
-	} else if err := h.notifier.NotifyLiveInvite(ctx, recipient.FCMToken, call.id, call.callerUsername); err != nil {
-		logAt(errorLevel, "notify live call failed call_id=%s error=%v", call.id, err)
+	} else {
+		deliveryID := store.createNotification("live_invite", call.id, client.id, recipient.ID, h.now().UnixMilli())
+		messageID, notifyErr := h.notifier.NotifyLiveInvite(ctx, recipient.FCMToken, call.id, call.callerUsername, deliveryID)
+		store.finishNotification(deliveryID, messageID, notifyErr)
+		notificationStatus = "accepted"
+		if notifyErr != nil {
+			notificationStatus = "failed"
+			logAt(errorLevel, "notify live call failed call_id=%s error=%v", call.id, notifyErr)
+		}
 	}
+	h.reply(client, liveEvent{Type: "ringing", CallID: call.id, PeerUsername: call.recipientUsername, NotificationStatus: notificationStatus})
 	go h.expireCall(call.id, call.expiresAt, "unanswered")
 }
 
@@ -268,6 +320,8 @@ func (h *LiveHub) acceptCall(client *liveClient, callID string) {
 		return
 	}
 	call.accepted = true
+	_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='accepted',accepted_at=? WHERE id=?`, h.now().UnixMilli(), call.id)
+	h.store.recordCallEvent(call.id, client.id, "accepted", nil, h.now().UnixMilli())
 	h.connectCallLocked(call)
 	h.mu.Unlock()
 }
@@ -298,6 +352,8 @@ func (h *LiveHub) connectCallLocked(call *liveCall) {
 	}
 	call.reconnectDeadline = time.Time{}
 	call.generation++
+	_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='connected',generation=?,connected_at=COALESCE(connected_at,?) WHERE id=?`, call.generation, h.now().UnixMilli(), call.id)
+	h.store.recordCallEvent(call.id, "", "connected", map[string]any{"generation": call.generation}, h.now().UnixMilli())
 	h.reply(caller, liveEvent{Type: "connected", CallID: call.id, PeerUsername: call.recipientUsername, Generation: call.generation})
 	h.reply(recipient, liveEvent{Type: "connected", CallID: call.id, PeerUsername: call.callerUsername, Generation: call.generation})
 }
@@ -311,6 +367,8 @@ func (h *LiveHub) finishCall(client *liveClient, callID, reason string) {
 		return
 	}
 	delete(h.calls, callID)
+	_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='ended',ended_at=?,terminal_reason=? WHERE id=?`, h.now().UnixMilli(), reason, callID)
+	h.store.recordCallEvent(callID, client.id, "ended", map[string]any{"reason": reason}, h.now().UnixMilli())
 	participants := []*liveClient{h.clients[call.callerID], h.clients[call.recipientID]}
 	h.mu.Unlock()
 	for _, participant := range participants {
@@ -333,6 +391,8 @@ func (h *LiveHub) disconnect(client *liveClient) {
 			continue
 		}
 		call.reconnectDeadline = h.now().Add(h.reconnectTimeout)
+		_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='reconnecting' WHERE id=?`, call.id)
+		h.store.recordCallEvent(call.id, client.id, "disconnected", nil, h.now().UnixMilli())
 		deadlines[call.id] = call.reconnectDeadline
 		peerID, peerName := call.callerID, call.callerUsername
 		if peerID == client.id {
@@ -359,6 +419,8 @@ func (h *LiveHub) expireCall(callID string, deadline time.Time, reason string) {
 		return
 	}
 	delete(h.calls, callID)
+	_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='ended',ended_at=?,terminal_reason=? WHERE id=?`, h.now().UnixMilli(), reason, callID)
+	h.store.recordCallEvent(callID, "", "ended", map[string]any{"reason": reason}, h.now().UnixMilli())
 	participants := []*liveClient{h.clients[call.callerID], h.clients[call.recipientID]}
 	h.mu.Unlock()
 	for _, participant := range participants {
@@ -379,6 +441,8 @@ func (h *LiveHub) expireReconnect(callID string, deadline time.Time) {
 		return
 	}
 	delete(h.calls, callID)
+	_, _ = h.store.db.Exec(`UPDATE call_sessions SET state='ended',ended_at=?,terminal_reason='connection_lost' WHERE id=?`, h.now().UnixMilli(), callID)
+	h.store.recordCallEvent(callID, "", "ended", map[string]any{"reason": "connection_lost"}, h.now().UnixMilli())
 	participants := []*liveClient{h.clients[call.callerID], h.clients[call.recipientID]}
 	h.mu.Unlock()
 	for _, participant := range participants {
@@ -390,13 +454,39 @@ func (h *LiveHub) expireReconnect(callID string, deadline time.Time) {
 
 // handleLegacy preserves the v1 start/samples/end relay for already released clients.
 func (h *LiveHub) handleLegacy(ctx context.Context, client *liveClient, event liveEvent, store *Store) {
+	if event.CallID != "" {
+		h.mu.Lock()
+		call := h.calls[event.CallID]
+		valid := call != nil && call.accepted && (call.callerID == client.id || call.recipientID == client.id)
+		if valid && event.Type == "start" {
+			client.peerID = call.callerID
+			if client.peerID == client.id {
+				client.peerID = call.recipientID
+			}
+		}
+		h.mu.Unlock()
+		if !valid {
+			h.reply(client, liveEvent{Type: "error", CallID: event.CallID, Code: "CALL_UNAVAILABLE"})
+			return
+		}
+	}
 	if event.Type == "start" {
-		recipient, err := store.InstallationByUsername(ctx, event.RecipientUsername)
+		var recipient Installation
+		var err error
+		if event.CallID == "" {
+			recipient, err = store.InstallationByUsername(ctx, event.RecipientUsername)
+		}
 		if err != nil || !uuidPattern.MatchString(event.StreamID) || event.SamplePeriodMs < 1 || event.SamplePeriodMs > 100 {
 			h.reply(client, liveEvent{Type: "error", Code: "INVALID_START"})
 			return
 		}
-		client.peerID, client.streamID, client.nextIndex = recipient.ID, event.StreamID, 0
+		if event.CallID == "" {
+			client.peerID = recipient.ID
+		}
+		client.streamID, client.nextIndex = event.StreamID, 0
+		if event.CallID != "" {
+			h.store.recordCallEvent(event.CallID, client.id, "haptic_start", map[string]any{"streamId": event.StreamID}, h.now().UnixMilli())
+		}
 	}
 	if client.peerID == "" || (event.Type != "start" && event.Type != "samples" && event.Type != "end") {
 		h.reply(client, liveEvent{Type: "error", Code: "NO_ACTIVE_STREAM"})
@@ -412,6 +502,9 @@ func (h *LiveHub) handleLegacy(ctx context.Context, client *liveClient, event li
 	}
 	if event.Type == "samples" {
 		client.nextIndex += len(event.Amplitudes)
+		if event.CallID != "" {
+			_, _ = h.store.db.Exec(`UPDATE call_sessions SET haptic_frames=haptic_frames+? WHERE id=?`, len(event.Amplitudes), event.CallID)
+		}
 	}
 	encoded, _ := json.Marshal(event)
 	h.mu.Lock()
@@ -423,6 +516,9 @@ func (h *LiveHub) handleLegacy(ctx context.Context, client *liveClient, event li
 		h.reply(client, liveEvent{Type: "peerUnavailable"})
 	}
 	if event.Type == "end" {
+		if event.CallID != "" {
+			h.store.recordCallEvent(event.CallID, client.id, "haptic_end", map[string]any{"streamId": event.StreamID}, h.now().UnixMilli())
+		}
 		client.peerID, client.streamID = "", ""
 	}
 }
@@ -437,8 +533,18 @@ func validAmplitudes(values []int) bool {
 }
 
 func (h *LiveHub) reply(client *liveClient, event liveEvent) {
+	if event.Type == "error" {
+		logAt(warnLevel, "live event rejected installation_id=%s call_id=%s code=%s", installationLogID(client.id), event.CallID, event.Code)
+	}
 	raw, _ := json.Marshal(event)
-	h.send(client, raw)
+	select {
+	case <-client.done:
+		return
+	case client.control <- raw:
+	default:
+		logAt(errorLevel, "live control queue exhausted installation_id=%s event=%s", installationLogID(client.id), event.Type)
+		_ = client.conn.Close()
+	}
 }
 
 func (h *LiveHub) send(client *liveClient, raw []byte) {
@@ -451,5 +557,9 @@ func (h *LiveHub) send(client *liveClient, raw []byte) {
 	case client.send <- raw:
 	case <-client.done:
 	default:
+		var event liveEvent
+		if json.Unmarshal(raw, &event) == nil && event.CallID != "" {
+			_, _ = h.store.db.Exec(`UPDATE call_sessions SET queue_drops=queue_drops+1 WHERE id=?`, event.CallID)
+		}
 	}
 }

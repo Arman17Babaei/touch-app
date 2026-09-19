@@ -125,7 +125,7 @@ internal object AudioPlaybackCoordinator {
         val preferredOutput = outputs.firstOrNull(::isPrivateOutput)
             ?: if (allowSpeaker) outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } else null
         val media = MediaPlayer().apply {
-            setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             setDataSource(target.absolutePath)
             preferredOutput?.let { setPreferredDevice(it) }
             setOnCompletionListener { onFinished(); stop() }

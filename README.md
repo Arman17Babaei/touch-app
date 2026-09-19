@@ -60,6 +60,7 @@ The container supports these variables:
 - `TOUCH_FIREBASE_PROJECT_ID`
 - `GOOGLE_APPLICATION_CREDENTIALS`
 - `TOUCH_LOG_LEVEL` (`debug`, `info`, `warn`, or `error`; default `info`)
+- `TOUCH_ADMIN_TOKEN` (enables Bearer-protected diagnostic, call, and notification-history APIs)
 
 The server logs every HTTP status with a truncated installation ID. Authentication
 rejections identify whether the installation header was invalid or the ID was not
@@ -72,6 +73,20 @@ WebSocket diagnostics at runtime without rebuilding:
 ```shell
 adb shell setprop log.tag.TouchComm DEBUG
 adb logcat -s TouchComm
+```
+
+Clients retain at most 500 sanitized structured diagnostic events and upload them
+in bounded batches. Events include lifecycle transitions, stable error codes,
+device/API information, routes, permissions, and stream counters. They never include
+voice data, touch samples, credentials, raw FCM tokens, arbitrary Logcat, or full
+stack traces. Server diagnostic and notification-event history expires after seven days.
+
+When `TOUCH_ADMIN_TOKEN` is set, inspect recent state with:
+
+```shell
+curl -H "Authorization: Bearer $TOUCH_ADMIN_TOKEN" http://localhost:8080/v1/admin/calls
+curl -H "Authorization: Bearer $TOUCH_ADMIN_TOKEN" http://localhost:8080/v1/admin/notifications
+curl -H "Authorization: Bearer $TOUCH_ADMIN_TOKEN" 'http://localhost:8080/v1/admin/diagnostics?limit=100'
 ```
 
 ## Firebase client configuration
@@ -104,7 +119,12 @@ Install each debug APK, then enter on each device:
 1. A backend address reachable from that device, such as
    `http://192.168.1.20:8080`.
 2. A unique username for that installation.
-3. The other installation's username as its peer.
+3. Optionally, an initial contact username. More saved/recent contacts can be selected later.
+
+Setup displays the username and a non-reversible fingerprint of the FCM token held
+by the server. **Verify notifications** sends a real high-priority challenge and
+reports whether this installation acknowledged it; Firebase accepting a send alone
+is not treated as proof of delivery.
 
 Plain HTTP is permitted only by the debug manifests. Release builds require
 HTTPS unless their network policy is changed deliberately.
@@ -157,18 +177,29 @@ instead of cancelling the vibrator for every packet. Phones without amplitude
 control retain the on/off duty-cycle mapping for intensity; watches and phones
 with amplitude control use amplitude waveforms.
 
-The app no longer keeps the screen awake. Locking or leaving either app hangs up
-the active call, while FCM continues to deliver durable touches and new Live
-invitations. An accidental network loss enters Reconnecting for up to 30 seconds;
+The app no longer keeps the screen awake. A foreground call service keeps ringing
+or connected calls active while the screen dims or another activity is visible.
+An accidental network loss enters Reconnecting for up to 30 seconds;
 successful resume creates fresh stream IDs and resets sample indexes. Recorded
 **Send** remains the durable and offline-capable path.
+
+Incoming calls use Android's call-style notification with Answer and Decline actions
+and a full-screen call intent on locked devices where the platform permits it. Android
+14+ may require enabling full-screen call access; otherwise the app falls back to a
+high-priority heads-up notification. Connected calls retain an ongoing Hang Up action.
 
 The WebSocket endpoint is `GET /v1/live`, authenticated with the same
 `X-Installation-ID` header. Call control uses `call`, `accept`, `decline`,
 `resume`, and `hangup`, with `ringing`, `incoming`, `connected`, `reconnecting`,
 and `ended` responses. Streaming continues to use `start`, `samples`, and `end`
-for compatibility with existing clients. `startIndex` is zero-based and must be
+for compatibility with existing clients. New clients attach `callId` so the server
+rejects streams outside an accepted call. Control events use a separate priority
+queue and bounded media-queue drops are counted. `startIndex` is zero-based and must be
 present even for the first batch.
+
+Live AAC sends the encoder-provided AudioSpecificConfig and presentation timestamp;
+the receiver no longer assumes a hard-coded codec configuration. This prevents a
+sample-rate mismatch from turning speech into low beeps on different devices.
 
 ## Voice audio and privacy
 
@@ -182,6 +213,22 @@ hearing-aid routes. It never auto-plays on speakers, car/cast/HDMI routes, or ge
 Bluetooth media devices. **Audio** / **Play audio** explicitly permits speaker output only
 for the current item or call. Removing headphones stops voice immediately. Live voice is
 foreground-only and ephemeral; durable voice is the optional `audio` API object.
+
+Phone and watch Live screens show call generation, route, microphone/output state,
+and audio counters, with exact terminal errors on the watch. On Wear OS, the rotating
+bezel changes system media volume while Live or inbox voice is active; elsewhere it
+continues to scroll.
+
+## Contacts and delivery status
+
+Each installation has up to 50 saved contacts and 50 automatically maintained recent
+recipients. The active contact is shared by Send and Live until changed. Contacts are
+validated against registered usernames, reject self-contact, and remain installation-specific.
+
+Every FCM attempt receives a delivery ID. The backend stores provider acceptance or
+failure and client reports for receipt, presentation, open/action, and sync outcome.
+Message senders can query `/v1/touches/{touchId}/status`; operators can correlate call,
+notification, and client timelines through the protected admin endpoints.
 
 ## Tests
 

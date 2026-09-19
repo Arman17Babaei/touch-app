@@ -10,6 +10,9 @@ import android.os.Looper
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.provider.Settings
+import android.net.Uri
+import android.app.NotificationManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -44,6 +47,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.rotary.onRotaryScrollEvent
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,6 +122,11 @@ class MainActivity : ComponentActivity() {
     }
 
     fun requestMicrophonePermission() = requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101)
+    fun requestFullScreenCalls(){if(Build.VERSION.SDK_INT>=34&&!getSystemService(NotificationManager::class.java).canUseFullScreenIntent())startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,Uri.parse("package:$packageName")))}
+}
+
+class IncomingCallActivity:ComponentActivity(){
+    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setShowWhenLocked(true);setTurnScreenOn(true);app.touch.communication.LiveCallService.command(this,app.touch.communication.LiveCallService.ACTION_OPENED);val caller=intent.getStringExtra(app.touch.communication.LiveCallService.EXTRA_CALLER).orEmpty();val callId=intent.getStringExtra(app.touch.communication.LiveCallService.EXTRA_CALL_ID);setContent{MaterialTheme{Box(Modifier.fillMaxSize().background(Charcoal),contentAlignment=Alignment.Center){Column(horizontalAlignment=Alignment.CenterHorizontally){Text(caller,color=Coral,fontSize=16.sp);Text("IS CALLING",fontSize=10.sp);Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.padding(top=10.dp)){Button(onClick={app.touch.communication.LiveCallService.command(this@IncomingCallActivity,app.touch.communication.LiveCallService.ACTION_DECLINE);finish()},modifier=Modifier.size(52.dp),colors=ButtonDefaults.buttonColors(backgroundColor=Charcoal)){Text("NO",fontSize=9.sp)};Button(onClick={if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO),101);app.touch.communication.LiveCallService.command(this@IncomingCallActivity,app.touch.communication.LiveCallService.ACTION_ACCEPT);packageManager.getLaunchIntentForPackage(packageName)?.putExtra(TouchNotificationIntents.EXTRA_LIVE_CALL_ID,callId)?.putExtra(TouchNotificationIntents.EXTRA_LIVE_CALLER,caller)?.let(::startActivity);finish()},modifier=Modifier.size(52.dp),colors=ButtonDefaults.buttonColors(backgroundColor=Coral)){Text("YES",fontSize=9.sp)}}}}}}}
 }
 
 private data class DebugSetup(val backend: String, val username: String, val peer: String)
@@ -139,6 +151,7 @@ private fun TouchWearApp(
 ) {
     MaterialTheme {
         val settings by communication.settings.collectAsState(initial = CommunicationSettings())
+        val currentLive by communication.liveState.collectAsState()
         var screen by remember { mutableStateOf<Screen?>(null) }
         var liveIncoming by remember { mutableStateOf(false) }
         val invite by incomingInvite.collectAsState()
@@ -151,12 +164,12 @@ private fun TouchWearApp(
         }
         LaunchedEffect(settings) {
             if (screen == null && settings.installationId.isNotBlank()) {
-                screen = if (settings.isConfigured) Screen.RECORDER else Screen.SETUP
+                screen = if (!settings.isConfigured) Screen.SETUP else if(currentLive.status in setOf(LiveStatus.CONNECTING,LiveStatus.RINGING,LiveStatus.INCOMING,LiveStatus.CONNECTED,LiveStatus.RECONNECTING))Screen.LIVE else Screen.RECORDER
             }
         }
         LaunchedEffect(invite) {
             invite?.let {
-                communication.prepareIncomingLive(it.callId, it.callerUsername)
+                if(communication.liveState.value.callId!=it.callId)communication.prepareIncomingLive(it.callId, it.callerUsername)
                 liveIncoming = true
                 screen = Screen.LIVE
                 incomingInvite.value = null
@@ -166,7 +179,7 @@ private fun TouchWearApp(
             when (screen) {
                 Screen.SETUP -> SetupScreen(settings, communication) { screen = Screen.RECORDER }
                 Screen.INBOX -> InboxScreen(communication) { screen = Screen.RECORDER }
-                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming) { screen = Screen.RECORDER }
+                Screen.LIVE -> LiveScreen(communication, autoStart = !liveIncoming && currentLive.status !in setOf(LiveStatus.CONNECTING,LiveStatus.RINGING,LiveStatus.INCOMING,LiveStatus.CONNECTED,LiveStatus.RECONNECTING)) { screen = Screen.RECORDER }
                 Screen.RECORDER -> RecorderScreen(communication, { liveIncoming = false; screen = Screen.LIVE }, { screen = Screen.INBOX }, { screen = Screen.SETUP })
                 null -> Text("Starting…")
             }
@@ -176,26 +189,37 @@ private fun TouchWearApp(
 
 @Composable
 private fun SetupScreen(settings: CommunicationSettings, communication: TouchCommunication, onDone: () -> Unit) {
+    val context=androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
+    val contacts by communication.contacts.collectAsState()
+    val serverStatus by communication.installationStatus.collectAsState()
     var backend by remember(settings.backendUrl) { mutableStateOf(settings.backendUrl.ifBlank { "http://192.168.1.2:8080" }) }
     var username by remember(settings.username) { mutableStateOf(settings.username) }
     var peer by remember(settings.peerUsername) { mutableStateOf(settings.peerUsername) }
     var error by remember { mutableStateOf(false) }
+    var pushStatus by remember{mutableStateOf<String?>(null)}
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize().padding(horizontal = 22.dp)) {
         Text("CONNECT", color = Coral, fontSize = 15.sp)
         WearInput(backend, { backend = it }, "Backend URL")
         WearInput(username, { username = it }, "My username")
-        WearInput(peer, { peer = it }, "Peer username")
+        WearInput(peer, { peer = it }, "Contact (optional)")
+        serverStatus?.let{Text("FCM ${if(it.fcmTokenPresent)"OK" else "MISSING"}",fontSize=9.sp,color=Mint)}
+        if(contacts.isNotEmpty())Text("Contacts: "+contacts.take(3).joinToString{it.username},fontSize=8.sp)
         if (error) Text("Check all values", color = Coral, fontSize = 10.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (settings.isConfigured) Text("Cancel", fontSize = 11.sp, modifier = Modifier.clickable(onClick = onDone).padding(7.dp))
             Button(onClick = {
                 scope.launch {
                     error = runCatching { communication.configure(backend, username, peer) }.isFailure
+                    if(!error&&peer.isNotBlank())error=runCatching{communication.addContact(peer)}.isFailure
                     if (!error) onDone()
                 }
             }, modifier = Modifier.size(42.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Coral)) { Text("SAVE", fontSize = 9.sp) }
         }
+        if(settings.isConfigured)Text("VERIFY PUSH",color=Mint,fontSize=9.sp,modifier=Modifier.clickable{scope.launch{runCatching{communication.verifyNotifications{pushStatus=it.status}}.onFailure{pushStatus="FAILED"}}}.padding(4.dp))
+        if(contacts.any{it.saved&&it.username.equals(peer,true)})Text("REMOVE CONTACT",color=Coral,fontSize=8.sp,modifier=Modifier.clickable{scope.launch{communication.removeContact(peer);peer=""}}.padding(3.dp))
+        if(Build.VERSION.SDK_INT>=34)Text("CALL OVERLAY",color=Mint,fontSize=9.sp,modifier=Modifier.clickable{(context as? MainActivity)?.requestFullScreenCalls()}.padding(4.dp))
+        pushStatus?.let{Text(it.uppercase(),fontSize=8.sp)}
     }
 }
 
@@ -223,6 +247,8 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
     val player = remember { AndroidTouchPlayer(context.applicationContext) }
     val audioCapture = remember { RecordedAudioCapture(context.applicationContext) }
     val outbox by communication.outbox.collectAsState(initial = emptyList())
+    val settings by communication.settings.collectAsState(initial=CommunicationSettings())
+    val contacts by communication.contacts.collectAsState()
     var recording by remember { mutableStateOf(false) }
     var elapsed by remember { mutableIntStateOf(0) }
     var touch by remember { mutableStateOf<Touch?>(null) }
@@ -280,6 +306,8 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
             } finally { recorder.cancelPointers() }
         }) { Text(if (recording) "TOUCH" else sendState ?: formatDuration(elapsed)) }
 
+        if(!recording)Text("TO: ${settings.peerUsername.ifBlank{"CHOOSE"}}",fontSize=9.sp,modifier=Modifier.clickable{if(contacts.isNotEmpty()){val next=(contacts.indexOfFirst{it.username==settings.peerUsername}+1).coerceAtLeast(0)%contacts.size;scope.launch{communication.selectContact(contacts[next].username)}}}.padding(3.dp))
+
         if (recording) {
             Text(if (microphoneEnabled) "MIC ON" else "MIC OFF", fontSize = 9.sp, modifier = Modifier.clickable { microphoneEnabled = !microphoneEnabled; audioCapture.setMicrophoneEnabled(microphoneEnabled) }.padding(4.dp))
             Button(onClick = { finish(true) }, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(52.dp)) { Text("STOP", fontSize = 10.sp) }
@@ -305,7 +333,7 @@ private fun RecorderScreen(communication: TouchCommunication, onLive: () -> Unit
                         } finally { communication.setInteractionBusy(false) }
                     } }
                 }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("PLAY", fontSize = 8.sp) }
-                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it, audio) } } }, enabled = touch?.isSilent == false, colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("SEND", fontSize = 8.sp) }
+                Button(onClick = { touch?.let { scope.launch { sentId = communication.send(it, audio) } } }, enabled = touch?.isSilent == false && settings.peerUsername.isNotBlank(), colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal), modifier = Modifier.size(45.dp)) { Text("SEND", fontSize = 8.sp) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(top = 3.dp)) {
                 Text("Inbox", fontSize = 10.sp, modifier = Modifier.clickable(onClick = onInbox).padding(4.dp))
@@ -321,8 +349,14 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
     val context = androidx.compose.ui.platform.LocalContext.current
     val live by communication.liveState.collectAsState()
     val audio by communication.liveAudioState.collectAsState()
+    val diagnostics by communication.liveDiagnostics.collectAsState()
+    val audioManager=remember{context.getSystemService(AudioManager::class.java)}
+    val focusRequester=remember{FocusRequester()}
+    var volume by remember{mutableIntStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))}
     var elapsed by remember { mutableIntStateOf(0) }
-    LaunchedEffect(autoStart) { if (autoStart) communication.startLive() }
+    // autoStart describes why this particular Live screen was opened. Keying this
+    // effect by autoStart caused ENDED -> true to immediately place another call.
+    LaunchedEffect(Unit) { if (autoStart) communication.startLive() }
     LaunchedEffect(live.connectedAtMs) {
         val connectedAt = live.connectedAtMs ?: return@LaunchedEffect
         while (true) {
@@ -331,6 +365,7 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
         }
     }
     DisposableEffect(Unit) { onDispose { communication.setLiveAmplitude(0) } }
+    LaunchedEffect(Unit){focusRequester.requestFocus()}
     val connected = live.status == LiveStatus.CONNECTED
     val label = when (live.status) {
         LiveStatus.OFF -> "READY"
@@ -340,12 +375,12 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
         LiveStatus.CONNECTED -> "CONNECTED\n${formatDuration(elapsed)}"
         LiveStatus.RECONNECTING -> "RECONNECTING…"
         LiveStatus.ENDED -> "CALL ENDED"
-        LiveStatus.ERROR -> "CALL FAILED"
+        LiveStatus.ERROR -> "CALL FAILED\n${live.reason ?: "unknown error"}"
     }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
-        modifier = Modifier.fillMaxSize().padding(10.dp),
+        modifier = Modifier.fillMaxSize().padding(10.dp).focusRequester(focusRequester).focusable().onRotaryScrollEvent{event->audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,if(event.verticalScrollPixels<0)AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,0);volume=audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);true},
     ) {
         Box(
             contentAlignment = Alignment.Center,
@@ -368,10 +403,12 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
                     } finally { communication.setLiveAmplitude(0) }
                 },
         ) { Text(if (connected) "TOUCH" else label, fontSize = 11.sp) }
+        if(live.notificationStatus.isNotBlank())Text("INVITE ${live.notificationStatus.uppercase()}",fontSize=8.sp,color=Mint)
         if (connected) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (audio.microphoneEnabled) "MIC ON" else "MIC OFF", fontSize = 9.sp, modifier = Modifier.clickable { communication.setLiveMicrophoneEnabled(!audio.microphoneEnabled) }.padding(5.dp))
             Text(if (audio.outputEnabled) if (audio.privateRoute) "HEADPHONES" else "SPEAKER" else "PLAY AUDIO", fontSize = 9.sp, modifier = Modifier.clickable { communication.setLiveAudioOutputEnabled(!audio.outputEnabled) }.padding(5.dp))
         }
+        if(connected)Text("VOL $volume · G${live.generation} · H${diagnostics.bufferedMillis} U${diagnostics.underruns} · A${audio.decodedFrames}/${audio.encodedFrames} D${audio.droppedFrames}",fontSize=8.sp,color=Color.White.copy(alpha=.65f))
         when (live.status) {
             LiveStatus.INCOMING -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = communication::declineLive, modifier = Modifier.size(48.dp), colors = ButtonDefaults.buttonColors(backgroundColor = Charcoal)) { Text("NO", fontSize = 9.sp) }
@@ -389,10 +426,14 @@ private fun LiveScreen(communication: TouchCommunication, autoStart: Boolean, on
 
 @Composable
 private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
+    val context=androidx.compose.ui.platform.LocalContext.current
+    val audioManager=remember{context.getSystemService(AudioManager::class.java)}
+    val focusRequester=remember{FocusRequester()}
     val inbox by communication.inbox.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var confirmingClear by remember { mutableStateOf(false) }
     var playingAudioId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(playingAudioId){if(playingAudioId!=null)focusRequester.requestFocus()}
     if (confirmingClear) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize().padding(24.dp)) {
             Text("Clear all touches?", fontSize = 12.sp)
@@ -403,7 +444,7 @@ private fun InboxScreen(communication: TouchCommunication, onBack: () -> Unit) {
         }
         return
     }
-    ScalingLazyColumn(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+    ScalingLazyColumn(modifier = Modifier.fillMaxSize().focusRequester(focusRequester).focusable().onRotaryScrollEvent{event->if(playingAudioId==null)return@onRotaryScrollEvent false;audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,if(event.verticalScrollPixels<0)AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,0);true}, horizontalAlignment = Alignment.CenterHorizontally) {
         item { Text("INBOX", color = Coral) }
         item { Text("Clear", color = if (inbox.isEmpty()) Color.Gray else Coral, modifier = Modifier.clickable(enabled = inbox.isNotEmpty()) { confirmingClear = true }.padding(6.dp), fontSize = 10.sp) }
         if (inbox.isEmpty()) item { Text("No touches", fontSize = 11.sp) }
