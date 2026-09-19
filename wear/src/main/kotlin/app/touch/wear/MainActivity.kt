@@ -193,7 +193,7 @@ private fun SetupScreen(settings: CommunicationSettings, communication: TouchCom
     val scope = rememberCoroutineScope()
     val contacts by communication.contacts.collectAsState()
     val serverStatus by communication.installationStatus.collectAsState()
-    var backend by remember(settings.backendUrl) { mutableStateOf(settings.backendUrl.ifBlank { "http://192.168.1.2:8080" }) }
+    var backend by remember(settings.backendUrl) { mutableStateOf(settings.backendUrl.ifBlank { "https://api.arman-babaei.ir" }) }
     var username by remember(settings.username) { mutableStateOf(settings.username) }
     var peer by remember(settings.peerUsername) { mutableStateOf(settings.peerUsername) }
     var error by remember { mutableStateOf(false) }
