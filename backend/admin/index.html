@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Touch admin</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><p class="eyebrow">TOUCH / OPERATIONS</p><h1>Live diagnostics</h1></div>
+    <div class="topbar-actions"><span id="updated" class="muted">Not loaded</span><button id="refresh-now" class="primary">Refresh</button></div>
+  </header>
+  <main>
+    <section id="login" class="card login-card">
+      <div><h2>Admin access</h2><p>Use the backend admin token. It stays only in this browser tab.</p></div>
+      <label>Admin token<input id="token" type="password" autocomplete="off" placeholder="Bearer token"></label>
+      <div class="row"><button id="connect" class="primary">Connect</button><button id="forget" class="quiet">Forget token</button></div>
+      <p id="login-status" class="status"></p>
+    </section>
+    <section id="console" hidden>
+      <section class="metrics" aria-label="System status">
+        <article class="metric"><span>Connected clients</span><strong id="connected-count">–</strong><small id="client-summary">waiting for data</small></article>
+        <article class="metric"><span>Open streams</span><strong id="streams-count">–</strong><small id="stream-summary">calls and reconnects</small></article>
+        <article class="metric"><span>Push deliveries</span><strong id="notifications-count">–</strong><small>current result set</small></article>
+        <article class="metric danger"><span>Errors</span><strong id="errors-count">–</strong><small>filtered diagnostics</small></article>
+      </section>
+      <section class="layout">
+        <section class="card clients"><div class="card-head"><div><h2>Clients</h2><p>Registered installations and live socket status.</p></div><span id="client-count" class="badge">–</span></div><div id="client-list" class="client-list"></div></section>
+        <section class="card streams"><div class="card-head"><div><h2>Current streams</h2><p>Server-authoritative in-memory call state.</p></div><span id="open-count" class="badge">–</span></div><div id="stream-list" class="stream-list"></div></section>
+      </section>
+      <section class="card filters"><div class="card-head"><div><h2>Event explorer</h2><p>Filters affect only the diagnostic event feed.</p></div><button id="clear-filters" class="quiet">Clear filters</button></div>
+        <div class="filter-grid"><label>Client<select id="installation"><option value="">All clients</option></select></label><label>Call<select id="call"><option value="">All calls</option></select></label><label>Severity<select id="severity"><option value="">All severities</option><option value="fatal">Fatal</option><option value="error">Error</option><option value="warn">Warning</option><option value="info">Info</option></select></label><label>Since<select id="since"><option value="">All retained history</option><option value="15">Last 15 minutes</option><option value="60">Last hour</option><option value="360">Last 6 hours</option><option value="1440">Last day</option></select></label><label>Message/touch ID<input id="message" placeholder="Optional UUID"></label><label>Rows<select id="limit"><option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="500">500</option></select></label></div>
+        <div class="row"><button id="apply-filters" class="primary">Apply filters</button><label class="auto"><input id="auto-refresh" type="checkbox"> Refresh every 5 seconds</label></div>
+      </section>
+      <section class="dashboard-grid">
+        <section class="card table-card"><div class="card-head"><div><h2>Diagnostics</h2><p id="diagnostic-summary">–</p></div></div><div id="diagnostics" class="scroll"></div></section>
+        <aside class="card detail"><div class="card-head"><div><h2 id="timeline-title">Timeline</h2><p>Call or delivery details.</p></div><button id="clear-detail" class="quiet">Clear</button></div><div id="timeline" class="timeline empty">Select a call, stream, or notification.</div></aside>
+      </section>
+      <section class="dashboard-grid bottom-grid">
+        <section class="card table-card"><div class="card-head"><div><h2>Recent calls</h2><p>Click a row for the persisted timeline.</p></div></div><div id="calls" class="scroll"></div></section>
+        <section class="card table-card"><div class="card-head"><div><h2>Notification delivery</h2><p>Click a row for delivery acknowledgements.</p></div></div><div id="notifications" class="scroll"></div></section>
+      </section>
+    </section>
+  </main>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

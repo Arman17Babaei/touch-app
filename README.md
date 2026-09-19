@@ -89,6 +89,18 @@ curl -H "Authorization: Bearer $TOUCH_ADMIN_TOKEN" http://localhost:8080/v1/admi
 curl -H "Authorization: Bearer $TOUCH_ADMIN_TOKEN" 'http://localhost:8080/v1/admin/diagnostics?limit=100'
 ```
 
+For an interactive view, open `http://localhost:8080/admin/` (or the same
+path on the deployed backend), paste the admin token, and select calls or push
+deliveries to inspect their timelines. It also lists registered clients with
+their current Live WebSocket status, active/reconnecting call and generation,
+and bounded relay queue depths; these values are server-memory snapshots, so
+they disappear on backend restart. The panel is only a static same-origin
+shell: it holds the token in browser session storage for the current tab and
+uses the existing Bearer-protected APIs; it does not put a token in a URL,
+cookie, server log, or page source. Use the filters to narrow client events by
+call, installation, message/touch, severity, or time, and optionally refresh
+the view automatically.
+
 ## Firebase client configuration
 
 Register one Android app, `ir.armanbabaei.touch`, in Firebase. Both the mobile

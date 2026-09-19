@@ -364,6 +364,30 @@ func (s *Server) adminDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"events": items})
 }
+func (s *Server) adminClients(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	snapshot := s.hub.adminSnapshot()
+	rows, err := s.store.db.QueryContext(r.Context(), `SELECT id,handle,platform,updated_at,fcm_token<>'' FROM installations ORDER BY handle COLLATE NOCASE LIMIT 500`)
+	if err != nil {
+		writeAPIError(w, 500, errorInternal, "query failed")
+		return
+	}
+	defer rows.Close()
+	clients := []map[string]any{}
+	for rows.Next() {
+		var id, username, platform string
+		var updatedAt int64
+		var tokenPresent bool
+		if rows.Scan(&id, &username, &platform, &updatedAt, &tokenPresent) != nil {
+			continue
+		}
+		live := snapshot.Clients[id]
+		clients = append(clients, map[string]any{"installationId": id, "username": username, "platform": platform, "updatedAtMs": updatedAt, "tokenPresent": tokenPresent, "connected": live.Connected, "activeCallId": live.ActiveCallID, "callState": live.CallState, "generation": live.Generation, "mediaQueueDepth": live.MediaQueueDepth, "controlQueueDepth": live.ControlQueueDepth})
+	}
+	writeJSON(w, 200, map[string]any{"clients": clients, "streams": snapshot.Streams})
+}
 func (s *Server) adminCalls(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return

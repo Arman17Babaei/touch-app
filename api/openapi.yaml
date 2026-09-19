@@ -154,11 +154,22 @@ paths:
         - { name: sinceMs, in: query, schema: { type: integer, format: int64 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
       responses: { '200': { description: Recent structured client diagnostics. }, '401': { $ref: '#/components/responses/Error' } }
+  /admin/:
+    get:
+      operationId: adminPanel
+      summary: Interactive same-origin admin panel for diagnostic data.
+      description: Static console shell. It asks for TOUCH_ADMIN_TOKEN in the browser and reads only the existing Bearer-protected admin APIs; the page itself contains no diagnostic data.
+      responses: { '200': { description: HTML admin console. } }
   /v1/admin/calls:
     get:
       operationId: adminCalls
       security: [ { adminBearer: [] } ]
       responses: { '200': { description: Recent call sessions and transport counters. }, '401': { $ref: '#/components/responses/Error' } }
+  /v1/admin/clients:
+    get:
+      operationId: adminClients
+      security: [ { adminBearer: [] } ]
+      responses: { '200': { description: Registered client summaries plus current ephemeral Live socket and stream state; no FCM tokens or media are returned. }, '401': { $ref: '#/components/responses/Error' } }
   /v1/admin/calls/{callId}:
     get:
       operationId: adminCallTimeline

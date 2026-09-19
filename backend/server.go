@@ -34,6 +34,8 @@ func NewServer(store *Store, notifier Notifier) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /admin", s.adminPanelRedirect)
+	mux.HandleFunc("GET /admin/", s.adminPanel)
 	mux.HandleFunc("PUT /v1/installations/{id}", s.registerInstallation)
 	mux.HandleFunc("GET /v1/installations/{id}", s.installationStatus)
 	mux.HandleFunc("POST /v1/installations/{id}/push-tests", s.startPushTest)
@@ -46,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/notifications/{id}/events", s.notificationEvent)
 	mux.HandleFunc("GET /v1/touches/{id}/status", s.touchStatus)
 	mux.HandleFunc("GET /v1/admin/diagnostics", s.adminDiagnostics)
+	mux.HandleFunc("GET /v1/admin/clients", s.adminClients)
 	mux.HandleFunc("GET /v1/admin/calls", s.adminCalls)
 	mux.HandleFunc("GET /v1/admin/calls/{id}", s.adminCall)
 	mux.HandleFunc("GET /v1/admin/notifications", s.adminNotifications)

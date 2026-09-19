@@ -73,6 +73,22 @@ func TestDiagnosticsRequireAdminToken(t *testing.T) {
 	}
 }
 
+func TestAdminClientsIncludesRegisteredAndLiveSnapshot(t *testing.T) {
+	server, _, _ := testServer(t)
+	handler := server.Handler()
+	register(t, handler, phoneID, "phone", "phone", "phone-token")
+	register(t, handler, watchID, "watch", "watch", "")
+	server.hub.mu.Lock()
+	server.hub.clients[phoneID] = &liveClient{id: phoneID, username: "phone", send: make(chan []byte, 2), control: make(chan []byte, 1)}
+	server.hub.calls[messageID] = &liveCall{id: messageID, callerID: phoneID, callerUsername: "phone", recipientID: watchID, recipientUsername: "watch", accepted: true, generation: 3}
+	server.hub.mu.Unlock()
+	t.Setenv("TOUCH_ADMIN_TOKEN", "secret")
+	result := httptestResult(handler, newAdminRequest(t, http.MethodGet, "/v1/admin/clients", "secret"))
+	if result.Code != http.StatusOK || !contains(result.Body.String(), `"connected":true`) || !contains(result.Body.String(), `"generation":3`) || contains(result.Body.String(), "phone-token") {
+		t.Fatalf("clients: %d %s", result.Code, result.Body.String())
+	}
+}
+
 func TestNotificationTimelineAndSenderStatus(t *testing.T) {
 	server, store, _ := testServer(t)
 	handler := server.Handler()

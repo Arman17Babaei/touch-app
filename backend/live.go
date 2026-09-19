@@ -53,6 +53,35 @@ type liveCall struct {
 	generation        int
 }
 
+// adminLiveSnapshot is intentionally metadata-only: it describes ephemeral
+// socket/call state but never carries a token, audio, touch sample, or queue
+// payload. It is read under the hub lock for the protected admin endpoint.
+type adminLiveSnapshot struct {
+	Clients map[string]adminLiveClient `json:"-"`
+	Streams []adminLiveStream          `json:"streams"`
+}
+
+type adminLiveClient struct {
+	Connected         bool
+	ActiveCallID      string
+	CallState         string
+	Generation        int
+	MediaQueueDepth   int
+	ControlQueueDepth int
+}
+
+type adminLiveStream struct {
+	CallID            string `json:"callId"`
+	CallerID          string `json:"callerInstallationId"`
+	CallerUsername    string `json:"callerUsername"`
+	RecipientID       string `json:"recipientInstallationId"`
+	RecipientUsername string `json:"recipientUsername"`
+	State             string `json:"state"`
+	Generation        int    `json:"generation"`
+	Accepted          bool   `json:"accepted"`
+	ReconnectUntilMs  int64  `json:"reconnectUntilMs,omitempty"`
+}
+
 type liveEvent struct {
 	Type               string         `json:"type"`
 	CallID             string         `json:"callId,omitempty"`
@@ -82,6 +111,35 @@ func NewLiveHub(store *Store, notifier Notifier, now func() time.Time) *LiveHub 
 		clients: map[string]*liveClient{}, calls: map[string]*liveCall{}, store: store, notifier: notifier, now: now,
 		ringTimeout: defaultRingTimeout, reconnectTimeout: defaultReconnectTimeout,
 	}
+}
+
+func (h *LiveHub) adminSnapshot() adminLiveSnapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snapshot := adminLiveSnapshot{Clients: make(map[string]adminLiveClient, len(h.clients)), Streams: make([]adminLiveStream, 0, len(h.calls))}
+	for id, client := range h.clients {
+		snapshot.Clients[id] = adminLiveClient{Connected: true, MediaQueueDepth: len(client.send), ControlQueueDepth: len(client.control)}
+	}
+	for _, call := range h.calls {
+		state := "ringing"
+		if call.accepted {
+			state = "connected"
+			if h.clients[call.callerID] == nil || h.clients[call.recipientID] == nil {
+				state = "reconnecting"
+			}
+		}
+		stream := adminLiveStream{CallID: call.id, CallerID: call.callerID, CallerUsername: call.callerUsername, RecipientID: call.recipientID, RecipientUsername: call.recipientUsername, State: state, Generation: call.generation, Accepted: call.accepted}
+		if !call.reconnectDeadline.IsZero() {
+			stream.ReconnectUntilMs = call.reconnectDeadline.UnixMilli()
+		}
+		snapshot.Streams = append(snapshot.Streams, stream)
+		for _, id := range []string{call.callerID, call.recipientID} {
+			status := snapshot.Clients[id]
+			status.ActiveCallID, status.CallState, status.Generation = call.id, state, call.generation
+			snapshot.Clients[id] = status
+		}
+	}
+	return snapshot
 }
 
 func (s *Server) live(w http.ResponseWriter, r *http.Request) {
